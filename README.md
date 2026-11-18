@@ -1,6 +1,22 @@
 # Local voice-over studio
 
-This project starts with a command-line voice trial. It generates a short WAV from your own reference recording and either typed text or a `.txt` script. The browser studio and later self-hosting milestones are in [plan.md](plan.md). Development instructions are in [AGENTS.md](AGENTS.md).
+This project runs a private browser studio for turning scripts into recordings in your voice. The command-line voice trial is also available for short model comparisons. See [plan.md](plan.md) for the project milestones and [AGENTS.md](AGENTS.md) for development instructions.
+
+## Start the browser studio
+
+If the existing Python environment and model files are in place, start the studio from the project directory in PowerShell.
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python and model setup from step 1 below, `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
+
+1. The studio imports `data\reference.wav` on the first run. Use **Replace reference** to enroll a different 6–30 second PCM WAV under 16 MB.
+2. Paste text or use **Import .txt** to load a UTF-8 script of up to 12,000 characters. Edit the text and select **Generate voice-over**.
+3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
+
+Recording history and private files live under `data\studio`. The web server listens only on this computer with the launch command above. Only `studio\static` is served as public assets. The local server is intended for owner use. A self-hosted deployment needs owner authentication before it can be exposed through a network.
 
 ## First voice trial
 

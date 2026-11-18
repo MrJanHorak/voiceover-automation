@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Voice-over Studio</title>
+  <link rel="stylesheet" href="/assets/studio.css">
+  <script src="/assets/studio.js" defer></script>
+</head>
+<body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
+      <span class="local-status"><span></span> Local workspace</span>
+    </div>
+  </header>
+  <main class="workspace">
+    <div class="page-title">
+      <h1>Create a voice-over</h1>
+      <p>Your voice and scripts stay on this computer.</p>
+    </div>
+
+    <div class="work-grid">
+      <section class="panel script-panel" aria-labelledby="script-heading">
+        <div class="panel-heading">
+          <h2 id="script-heading">Script</h2>
+          <button class="button button-quiet" id="import-script" type="button">Import .txt</button>
+          <input id="script-file" type="file" accept=".txt,text/plain" hidden>
+        </div>
+        <form id="script-form">
+          <label for="recording-title">Recording title <span class="muted">· Optional</span></label>
+          <input id="recording-title" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Studio demo">
+          <label for="script">Script text</label>
+          <textarea id="script" rows="10" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
+          <div class="script-meta"><span id="imported-file"></span><span id="script-count"></span></div>
+          <p id="script-error" class="error" role="alert" hidden></p>
+          <div class="form-footer">
+            <button class="button button-primary" id="generate" type="submit" disabled>Generate voice-over</button>
+            <span class="muted" id="queue-note"></span>
+          </div>
+        </form>
+      </section>
+
+      <aside class="side-grid" aria-label="Voice and output">
+        <section class="panel" aria-labelledby="voice-heading">
+          <div class="panel-heading">
+            <h2 id="voice-heading">Voice reference</h2>
+            <span class="muted device">{{ device|upper }} inference</span>
+          </div>
+          <div class="reference-card">
+            <span class="wave-mark reference-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <div class="voice-details"><strong id="voice-name">Checking for a reference…</strong><div class="muted" id="voice-duration"></div></div>
+          </div>
+          <audio id="voice-audio" aria-label="Active voice reference" controls preload="none" hidden></audio>
+          <p id="voice-error" class="error" role="alert" hidden></p>
+          <div class="reference-actions">
+            <button class="button button-quiet" id="choose-voice" type="button">Add reference WAV</button>
+            <input id="voice-file" type="file" accept=".wav,audio/wav" hidden>
+            <span class="muted">6–30 seconds</span>
+          </div>
+        </section>
+
+        <section class="panel result-panel" aria-labelledby="result-heading">
+          <div class="panel-heading"><h2 id="result-heading">Recording</h2><span id="result-status" class="status" hidden></span></div>
+          <div id="result-message" class="result-message" role="status" aria-live="polite">Generate a voice-over to play and download it here.</div>
+          <p id="result-error" class="error" role="alert" hidden></p>
+          <div id="export" hidden>
+            <audio id="result-audio" aria-label="Full recording" controls preload="metadata"></audio>
+            <div class="downloads">
+              <a class="button button-quiet" id="download-wav">Download WAV</a>
+              <a class="button button-quiet" id="download-mp3">Download MP3</a>
+            </div>
+          </div>
+          <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
+        </section>
+      </aside>
+    </div>
+
+    <section class="panel wide-panel" id="review" aria-labelledby="review-heading" hidden>
+      <div class="panel-heading"><h2 id="review-heading">Sections</h2><button class="button button-quiet" id="reuse-script" type="button">Use original script</button></div>
+      <p class="muted review-hint">Review each section or adjust its text to fix a pronunciation.</p>
+      <div id="sections" class="section-list"></div>
+    </section>
+
+    <section class="panel wide-panel" aria-labelledby="history-heading">
+      <div class="panel-heading"><h2 id="history-heading">Recording history</h2></div>
+      <p id="history-empty" class="muted">Your recordings will appear here.</p>
+      <ul id="history" class="history" aria-label="Saved recordings"></ul>
+    </section>
+  </main>
+</body>
+</html>

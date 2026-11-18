@@ -33,6 +33,8 @@ The owner preferred `data/second-take.wav` for its emphasis and pauses. It came 
 
 ## Phase 1 · Private studio
 
+The local studio implements enrollment, pasted text and UTF-8 `.txt` import, section-by-section generation, review, retry, and WAV and MP3 downloads. It starts on loopback and keeps submitted scripts and recordings under the ignored `data/studio/` directory. Word and PDF import and private network hosting remain later steps.
+
 ### Build the operator workflow
 
 - **Voice profile** takes the owner's reference WAV, validates duration and format, and keeps a normalized copy with an internal ID and revision. Let the owner replace the active reference without changing previous exports. Keep enrollment owner-only throughout both phases.
