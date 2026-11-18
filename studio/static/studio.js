@@ -2,10 +2,11 @@ const byId = (id) => document.getElementById(id);
 const script = byId("script");
 const scriptLimit = Number(document.body.dataset.scriptLimit);
 const chunkLimit = Number(document.body.dataset.chunkLimit);
+const maxPause = Number(document.body.dataset.maxPause);
 const statusNames = { queued: "Queued", running: "Generating", ready: "Ready", failed: "Failed" };
 
 let selected = null;
-let state = { voice: null, jobs: [] };
+let state = { voice: null, voices: [], jobs: [] };
 let job = null;
 let jobSignature = "";
 let historySignature = "";
@@ -14,7 +15,10 @@ let jobRequest = 0;
 let initialLoad = true;
 let polling = false;
 let submitting = false;
+let referenceBusy = false;
+let voiceRevision = 0;
 const sectionDrafts = new Map();
+const pauseDrafts = new Map();
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -53,26 +57,81 @@ function change(url, { method = "POST", value } = {}) {
 
 function updateEditor() {
   byId("script-count").textContent = `${script.value.length.toLocaleString()} / ${scriptLimit.toLocaleString()}`;
-  byId("generate").disabled = submitting || !state.voice || !script.value.trim();
+  byId("generate").disabled = submitting || referenceBusy || !state.voice || !script.value.trim();
+}
+
+function cuePicker(field, errorId) {
+  const picker = byId("delivery-cues").content.firstElementChild.cloneNode(true);
+  picker.disabled = field.readOnly;
+  picker.addEventListener("change", () => {
+    const cue = picker.value;
+    picker.value = "";
+    if (!cue) return;
+    const position = field.selectionStart ?? field.value.length;
+    const prefix = position && !/\s/.test(field.value[position - 1]) ? " " : "";
+    const next = field.value[position];
+    const suffix = !next || !/[\s.,!?;:]/.test(next) ? " " : "";
+    const insertion = `${prefix}${cue}${suffix}`;
+    if (field.value.length + insertion.length > field.maxLength) {
+      errorAt(errorId, "Shorten the text to make room for the delivery cue.");
+      return;
+    }
+    errorAt(errorId);
+    field.setRangeText(insertion, position, position, "end");
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.focus();
+  });
+  return picker;
 }
 
 function renderVoice() {
-  const signature = JSON.stringify([state.voice, state.reference_notice]);
+  const signature = JSON.stringify([state.voice, state.voices, state.reference_notice]);
   if (signature === voiceSignature) return;
   voiceSignature = signature;
   const voice = state.voice;
   const audio = byId("voice-audio");
+  const menu = byId("voice-selection");
   byId("voice-name").textContent = voice ? voice.label : "No voice reference yet";
   byId("voice-duration").textContent = voice ? `${voice.duration.toFixed(1)} seconds · WAV` : "Add a recording of your voice to get started.";
-  byId("choose-voice").textContent = voice ? "Replace reference" : "Add reference WAV";
+  byId("saved-references").hidden = state.voices.length < 2;
+  menu.replaceChildren(...state.voices.map((item) => new Option(item.label, item.id)));
+  if (voice) menu.value = voice.id;
   audio.hidden = !voice;
   if (voice) {
-    audio.src = `/api/voice/current/audio?v=${voice.id}`;
+    const source = `/api/voice/${voice.id}/audio`;
+    if (audio.getAttribute("src") !== source) audio.src = source;
   } else if (audio.hasAttribute("src")) {
     audio.removeAttribute("src");
     audio.load();
   }
   errorAt("voice-error", state.reference_notice);
+}
+
+async function changeReference(url, options) {
+  if (referenceBusy) return false;
+  referenceBusy = true;
+  byId("voice-selection").disabled = true;
+  byId("choose-voice").disabled = true;
+  updateEditor();
+  errorAt("voice-error");
+  try {
+    const voice = await change(url, options);
+    voiceRevision++;
+    state.voice = voice;
+    if (!state.voices.some((item) => item.id === voice.id)) state.voices.unshift(voice);
+    state.reference_notice = null;
+    renderVoice();
+    return true;
+  } catch (error) {
+    byId("voice-selection").value = state.voice?.id ?? "";
+    errorAt("voice-error", error.message);
+    return false;
+  } finally {
+    referenceBusy = false;
+    byId("voice-selection").disabled = false;
+    byId("choose-voice").disabled = false;
+    updateEditor();
+  }
 }
 
 function badge(node, status) {
@@ -137,6 +196,49 @@ function updateExport(entry) {
   byId("download-mp3").href = `${route}/mp3?download=true`;
 }
 
+function pauseEditor(entry, section, key) {
+  const form = element("form", "section-pause");
+  const label = element("label", "", "Extra pause after section (ms)");
+  const input = element("input");
+  input.id = `pause-after-${section.number}`;
+  label.htmlFor = input.id;
+  input.type = "number";
+  input.min = "0";
+  input.max = String(maxPause);
+  input.step = "1";
+  input.required = true;
+  input.value = pauseDrafts.get(key) ?? section.pause_ms;
+  input.readOnly = entry.status !== "ready";
+  const save = element("button", "button button-quiet", "Update pause");
+  save.type = "submit";
+  const update = () => {
+    save.disabled = input.readOnly || !input.validity.valid || input.valueAsNumber === section.pause_ms;
+  };
+  input.addEventListener("input", () => {
+    pauseDrafts.set(key, input.value);
+    update();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (save.disabled) return;
+    save.disabled = true;
+    errorAt("result-error");
+    try {
+      await change(`/api/jobs/${entry.id}/sections/${section.number}/pause`, {
+        method: "PUT", value: { pause_ms: input.valueAsNumber },
+      });
+      pauseDrafts.delete(key);
+      await refreshJob();
+    } catch (error) {
+      errorAt("result-error", error.message);
+      update();
+    }
+  });
+  update();
+  form.append(label, input, save);
+  return form;
+}
+
 function renderSections(entry) {
   const container = byId("sections");
   const expanded = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.key));
@@ -145,7 +247,7 @@ function renderSections(entry) {
     container.replaceChildren();
     return;
   }
-  const sections = entry.sections.map((section) => {
+  const sections = entry.sections.map((section, index) => {
     const box = element("details", "section");
     const key = `${entry.id}-${section.number}`;
     box.dataset.key = key;
@@ -187,7 +289,10 @@ function renderSections(entry) {
         redo.disabled = false;
       }
     });
-    box.append(label, field, redo);
+    const actions = element("div", "section-actions");
+    actions.append(cuePicker(field, "result-error"), redo);
+    box.append(label, field, actions);
+    if (index + 1 < entry.sections.length) box.append(pauseEditor(entry, section, key));
     return box;
   });
   container.replaceChildren(...sections);
@@ -208,7 +313,7 @@ function renderJob(entry) {
     const next = entry.sections.find((section) => section.pending)?.number;
     const total = entry.sections.length;
     const phrases = {
-      queued: `Waiting to generate · ${total - remaining} of ${total} sections complete`,
+      queued: remaining ? `Waiting to generate · ${total - remaining} of ${total} sections complete` : "Waiting to rebuild exports…",
       running: next ? `Generating section ${next} of ${total}…` : "Preparing WAV and MP3…",
       ready: `${total} ${total === 1 ? "section" : "sections"} · ready to review`,
       failed: entry.export ? "Previous export available" : "Generation paused",
@@ -260,7 +365,9 @@ async function refresh() {
   if (polling) return;
   polling = true;
   try {
-    state = await request("/api/state");
+    const revision = voiceRevision;
+    const snapshot = await request("/api/state");
+    state = revision === voiceRevision ? snapshot : { ...state, jobs: snapshot.jobs };
     renderVoice();
     const pending = state.jobs.filter((row) => ["queued", "running"].includes(row.status)).length;
     byId("queue-note").textContent = pending ? `${pending} ${pending === 1 ? "recording" : "recordings"} in progress` : "";
@@ -325,26 +432,23 @@ byId("script-file").addEventListener("change", async (event) => {
 });
 
 byId("choose-voice").addEventListener("click", () => byId("voice-file").click());
+byId("voice-selection").addEventListener("change", (event) => {
+  changeReference(`/api/voice/${event.target.value}/active`, { method: "PUT" });
+});
 byId("voice-file").addEventListener("change", async (event) => {
   const file = event.target.files[0];
   event.target.value = "";
   if (!file) return;
-  const button = byId("choose-voice");
-  button.disabled = true;
-  errorAt("voice-error");
-  try {
-    if (file.size > 16 * 1024 * 1024) throw new Error("Choose a WAV file under 16 MB.");
-    const data = new FormData();
-    data.append("audio", file);
-    const voice = await change("/api/voice", { value: data });
-    state.voice = voice;
-    state.reference_notice = null;
-    renderVoice();
-    updateEditor();
-  } catch (error) {
-    errorAt("voice-error", error.message);
-  } finally {
-    button.disabled = false;
+  if (file.size > 16 * 1024 * 1024) {
+    errorAt("voice-error", "Choose a WAV file under 16 MB.");
+    return;
+  }
+  const data = new FormData();
+  data.append("audio", file);
+  data.append("name", byId("voice-label").value.trim());
+  if (await changeReference("/api/voice", { value: data })) {
+    byId("voice-label").value = "";
+    byId("new-reference").open = false;
   }
 });
 
@@ -369,6 +473,7 @@ byId("reuse-script").addEventListener("click", () => {
   script.focus();
 });
 
+byId("script-cue").append(cuePicker(script, "script-error"));
 updateEditor();
 refresh();
 window.setInterval(refresh, 1600);

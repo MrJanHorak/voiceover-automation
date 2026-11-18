@@ -12,9 +12,11 @@ If the existing Python environment and model files are in place, start the studi
 
 Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python and model setup from step 1 below, `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
 
-1. The studio imports `data\reference.wav` on the first run. Use **Replace reference** to enroll a different 6–30 second PCM WAV under 16 MB.
+1. The studio imports `data\reference.wav` on the first run. Use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
 2. Paste text or use **Import .txt** to load a UTF-8 script of up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
+
+Use **Insert cue** in the script or a section to add prompts for delivery and vocal sounds. Listen to the result to check the effect. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
 
 Recording history and private files live under `data\studio`. The web server listens only on this computer with the launch command above. Only `studio\static` is served as public assets. The local server is intended for owner use. A self-hosted deployment needs owner authentication before it can be exposed through a network.
 

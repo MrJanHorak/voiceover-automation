@@ -82,12 +82,12 @@ class TurboEngine:
 def export_audio(chunks, wav_path, mp3_path):
     with wave.open(str(wav_path), "wb") as master:
         master.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-        for index, path in enumerate(chunks):
-            if index:
-                master.writeframesraw(bytes(RATE * 2 * 160 // 1000))
+        for index, (path, pause_ms) in enumerate(chunks):
             with wave.open(str(path), "rb") as chunk:
                 if (chunk.getnchannels(), chunk.getsampwidth(), chunk.getframerate()) != (1, 2, RATE):
                     raise AudioError("A section has an unexpected audio format. Regenerate that section.")
                 master.writeframesraw(chunk.readframes(chunk.getnframes()))
+            if index + 1 < len(chunks):
+                master.writeframesraw(bytes(RATE * 2 * pause_ms // 1000))
 
     ffmpeg("-n", "-i", str(wav_path), "-codec:a", "libmp3lame", "-b:a", "96k", str(mp3_path))

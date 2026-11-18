@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="/assets/studio.css">
   <script src="/assets/studio.js" defer></script>
 </head>
-<body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}">
+<body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}">
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
@@ -33,7 +33,7 @@
           <input id="recording-title" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Studio demo">
           <label for="script">Script text</label>
           <textarea id="script" rows="10" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
-          <div class="script-meta"><span id="imported-file"></span><span id="script-count"></span></div>
+          <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
           <p id="script-error" class="error" role="alert" hidden></p>
           <div class="form-footer">
             <button class="button button-primary" id="generate" type="submit" disabled>Generate voice-over</button>
@@ -52,13 +52,22 @@
             <span class="wave-mark reference-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
             <div class="voice-details"><strong id="voice-name">Checking for a reference…</strong><div class="muted" id="voice-duration"></div></div>
           </div>
+          <div id="saved-references" hidden>
+            <label for="voice-selection">Saved references</label>
+            <select id="voice-selection"></select>
+          </div>
           <audio id="voice-audio" aria-label="Active voice reference" controls preload="none" hidden></audio>
           <p id="voice-error" class="error" role="alert" hidden></p>
-          <div class="reference-actions">
-            <button class="button button-quiet" id="choose-voice" type="button">Add reference WAV</button>
-            <input id="voice-file" type="file" accept=".wav,audio/wav" hidden>
-            <span class="muted">6–30 seconds</span>
-          </div>
+          <details id="new-reference" class="reference-enrollment">
+            <summary>Add reference WAV</summary>
+            <label for="voice-label">Reference name <span class="muted">· Optional</span></label>
+            <input id="voice-label" type="text" maxlength="100" placeholder="e.g. Warm narration">
+            <div class="reference-actions">
+              <button class="button button-quiet" id="choose-voice" type="button">Choose WAV</button>
+              <input id="voice-file" type="file" accept=".wav,audio/wav" hidden>
+              <span class="muted">6–30 seconds</span>
+            </div>
+          </details>
         </section>
 
         <section class="panel result-panel" aria-labelledby="result-heading">
@@ -79,7 +88,7 @@
 
     <section class="panel wide-panel" id="review" aria-labelledby="review-heading" hidden>
       <div class="panel-heading"><h2 id="review-heading">Sections</h2><button class="button button-quiet" id="reuse-script" type="button">Use original script</button></div>
-      <p class="muted review-hint">Review each section or adjust its text to fix a pronunciation.</p>
+      <p class="muted review-hint">Edit what a section says, add a delivery cue, or adjust the silence between sections.</p>
       <div id="sections" class="section-list"></div>
     </section>
 
@@ -89,5 +98,21 @@
       <ul id="history" class="history" aria-label="Saved recordings"></ul>
     </section>
   </main>
+  <template id="delivery-cues">
+    <select class="cue-select" aria-label="Insert delivery cue">
+      <option value="">Insert cue</option>
+      <optgroup label="Delivery">
+        <option value="[happy]">Happy</option>
+        <option value="[dramatic]">Dramatic</option>
+        <option value="[narration]">Narration</option>
+        <option value="[whispering]">Whisper</option>
+      </optgroup>
+      <optgroup label="Vocal sounds">
+        <option value="[chuckle]">Chuckle</option>
+        <option value="[laugh]">Laugh</option>
+        <option value="[sigh]">Sigh</option>
+      </optgroup>
+    </select>
+  </template>
 </body>
 </html>

@@ -17,9 +17,9 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; }
 [hidden] { display: none !important; }
-button, input, textarea { font: inherit; }
-button, a, input, textarea, audio { -webkit-tap-highlight-color: transparent; }
-button:focus-visible, a:focus-visible, audio:focus-visible, input:focus-visible, textarea:focus-visible {
+button, input, textarea, select { font: inherit; }
+button, a, input, textarea, select, audio { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible, audio:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
@@ -51,13 +51,20 @@ h2 { margin: 0; font-size: 1.18rem; letter-spacing: -.018em; line-height: 1.3; }
 .device { white-space: nowrap; }
 
 label { display: block; margin: .95rem 0 .45rem; font-size: .9rem; font-weight: 600; }
-input[type="text"], textarea {
+input[type="text"], input[type="number"], textarea, select {
   width: 100%; background: var(--surface); border: 1px solid var(--line);
   border-radius: 9px; padding: .73rem .85rem; color: var(--ink);
 }
+select {
+  appearance: none; min-height: 39px; padding-right: 2rem; font-size: .9rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: right 16px center, right 11px center;
+  background-size: 5px 5px; background-repeat: no-repeat;
+}
 input::placeholder, textarea::placeholder { color: #a1aab0; opacity: 1; }
 textarea { display: block; line-height: 1.55; resize: vertical; min-height: 170px; }
-.script-meta { display: flex; gap: .5rem; justify-content: space-between; margin-top: .55rem; font-size: .875rem; color: var(--muted); }
+.script-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-top: .55rem; font-size: .875rem; color: var(--muted); }
 #script-count { white-space: nowrap; margin-left: auto; }
 #imported-file { overflow-wrap: anywhere; }
 .form-footer, .reference-actions, .downloads { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
@@ -82,6 +89,9 @@ textarea { display: block; line-height: 1.55; resize: vertical; min-height: 170p
 .voice-details .muted { margin-top: .2rem; }
 audio { width: 100%; height: 42px; display: block; margin: .7rem 0; }
 .reference-actions { justify-content: space-between; }
+.reference-enrollment { margin-top: .75rem; }
+.reference-enrollment summary { cursor: pointer; font-size: .9rem; font-weight: 650; }
+.reference-enrollment .reference-actions { margin-top: .65rem; }
 .result-message { color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
 .result-panel #retry { margin-top: .8rem; }
 .error { color: var(--danger); font-size: .9rem; line-height: 1.5; margin: .7rem 0 0; }
@@ -97,7 +107,10 @@ audio { width: 100%; height: 42px; display: block; margin: .7rem 0; }
 .section summary { cursor: pointer; font-weight: 650; overflow-wrap: anywhere; }
 .section textarea { min-height: 75px; margin: .65rem 0; }
 .section label { margin-bottom: 0; }
-.section .button { margin-top: .35rem; }
+.section-actions, .section-pause { display: flex; align-items: center; flex-wrap: wrap; gap: .65rem; }
+.section-pause { margin-top: .85rem; padding-top: .65rem; border-top: 1px solid var(--line); }
+.section-pause label { margin: 0; }
+.section-pause input { width: 6.25rem; min-height: 39px; padding-block: .4rem; }
 .history { padding: 0; margin: 0; list-style: none; }
 .history li { display: flex; align-items: center; gap: .7rem; padding: .55rem 0; border-top: 1px solid var(--line); }
 .history li:first-child { border-top: 0; }

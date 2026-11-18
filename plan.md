@@ -49,6 +49,12 @@ The local studio implements enrollment, pasted text and UTF-8 `.txt` import, sec
 - Use a multi-paragraph script and verify that the first and last lines and every intervening chunk are present in the assembled file. Regenerate a single chunk and verify the other takes are preserved. Check that failed generation or export leaves any preceding valid download intact.
 - Test empty and malformed uploads, size limits, unavailable weights, and a simulated model failure. Exercise deterministic features with a fake engine and run actual inference separately. Review final sound and export specs before delivering real customer work.
 
+### Delivery controls
+
+1. **Extra pause after section** adjusts the inserted silence from 0 to 5,000 ms and rebuilds the WAV and MP3 from the existing section recordings. The default remains 160 ms between sections.
+2. **Insert cue** adds Chatterbox Turbo cues such as `[chuckle]`, `[sigh]`, and `[whispering]` in the script or a section. Treat cues as performance prompts and review the result by ear.
+3. **Saved references** lets the owner name new samples and switch between previously saved ones. Compare conversational, warm, and dramatic recordings using the same script, then choose the references that carry over the intended delivery while retaining the owner's voice. Evaluate Original Chatterbox locally if customers need stronger expression control. [Chatterbox model guidance](https://github.com/resemble-ai/chatterbox#original-chatterbox-tips)
+
 ### Self-host privately after local validation
 
 Run the same application and worker on a machine the owner controls. Start with owner access over a private VPN or an authenticated HTTPS reverse proxy, with persistent storage and a tested restore of the database and voice assets. Keep the worker reachable only by the app. Size the machine using measured synthesis time and storage use. Containerize when there is a target host and a verified GPU or CPU configuration.

@@ -7,16 +7,16 @@ from threading import Event, Thread
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from filelock import FileLock
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, TurboEngine, export_audio, prepare_reference
-from .store import CHUNK_LIMIT, SCRIPT_LIMIT, Store, StudioError, new_id
+from .store import CHUNK_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -31,6 +31,10 @@ class JobInput(BaseModel):
 
 class SectionInput(BaseModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
+
+
+class PauseInput(BaseModel):
+    pause_ms: Annotated[int, Field(strict=True, ge=0, le=MAX_PAUSE_MS)]
 
 
 def install_voice(store, source, label):
@@ -62,7 +66,7 @@ def render_job(store, engine, stop, job_id):
             except Exception:
                 (folder / filename).unlink(missing_ok=True)
                 raise
-        paths.append(folder / filename)
+        paths.append((folder / filename, section["pause_ms"]))
 
     if stop.is_set():
         return
@@ -161,7 +165,7 @@ def create_app(data_dir=None, engine=None):
     @app.get("/", include_in_schema=False)
     def home(request: Request):
         return templates.TemplateResponse(request=request, name="index.html", context={
-            "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "device": device,
+            "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS, "device": device,
         })
 
     @app.get("/assets/{asset}")
@@ -174,11 +178,12 @@ def create_app(data_dir=None, engine=None):
         return {**store.state(), "reference_notice": app.state.reference_notice}
 
     @app.post("/api/voice", dependencies=mutations, status_code=201)
-    def enroll(audio: Annotated[UploadFile, File()]):
+    def enroll(audio: Annotated[UploadFile, File()],
+               name: Annotated[str, Form(), StringConstraints(strip_whitespace=True, max_length=100)] = ""):
         contents = audio.file.read(MAX_REFERENCE_BYTES + 1)
         if len(contents) > MAX_REFERENCE_BYTES:
             raise StudioError("Choose a WAV file under 16 MB.", 413)
-        label = Path((audio.filename or "Reference.wav").replace("\\", "/")).name[:100]
+        label = name or Path((audio.filename or "Reference.wav").replace("\\", "/")).name[:100]
         with TemporaryDirectory(dir=store.root) as temporary:
             source = Path(temporary) / "upload.wav"
             source.write_bytes(contents)
@@ -193,6 +198,14 @@ def create_app(data_dir=None, engine=None):
             raise StudioError("Add a voice reference first.", 404)
         return file_response(store.voices / f"{voice['id']}.wav", "audio/wav")
 
+    @app.get("/api/voice/{voice_id}/audio")
+    def saved_reference_audio(voice_id: UUID):
+        return file_response(store.voices / f"{voice_id.hex}.wav", "audio/wav")
+
+    @app.put("/api/voice/{voice_id}/active", dependencies=mutations)
+    def activate_voice(voice_id: UUID):
+        return store.activate_voice(voice_id.hex)
+
     @app.post("/api/jobs", dependencies=mutations, status_code=202)
     def create_job(data: JobInput):
         return {"id": store.create_job(data.title or "Untitled recording", data.script)}
@@ -202,13 +215,18 @@ def create_app(data_dir=None, engine=None):
         job = store.job(job_id.hex)
         return {
             **{key: job[key] for key in ("id", "title", "script", "engine", "created_at", "status", "error", "export")},
-            "sections": [{key: section[key] for key in ("number", "text", "pending", "audio")}
+            "sections": [{key: section[key] for key in ("number", "text", "pending", "audio", "pause_ms")}
                          for section in job["sections"]],
         }
 
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput):
         store.regenerate(job_id.hex, number, data.text)
+        return {"id": job_id.hex}
+
+    @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)
+    def update_pause(job_id: UUID, number: int, data: PauseInput):
+        store.adjust_pause(job_id.hex, number, data.pause_ms)
         return {"id": job_id.hex}
 
     @app.post("/api/jobs/{job_id}/retry", dependencies=mutations, status_code=202)
