@@ -1,0 +1,5 @@
+# Install the matching PyTorch and torchaudio wheels first. See README.md.
+chatterbox-tts==0.1.7
+# The bundled Perth watermark implementation imports pkg_resources.
+setuptools<81
+soundfile>=0.12,<1
