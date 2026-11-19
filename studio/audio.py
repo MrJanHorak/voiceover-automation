@@ -103,7 +103,7 @@ class TurboEngine(ModelDetails):
         import torch
         torch.cuda.empty_cache()
 
-    def render(self, text, reference, seed, output):
+    def render(self, text, reference, seed, output, settings=None):
         os.environ["HF_HUB_OFFLINE"] = "1"
         import soundfile as sf
         import torch
@@ -117,11 +117,14 @@ class TurboEngine(ModelDetails):
             self.model = ChatterboxTurboTTS.from_local(self.model_dir, device=self.device)
 
         with torch.inference_mode():
-            if self.reference != reference:
-                self.model.prepare_conditionals(str(reference))
-                self.reference = reference
+            normalize = settings.get("normalize_reference", True) if settings else True
+            reference_key = (reference, normalize)
+            if self.reference != reference_key:
+                self.model.prepare_conditionals(str(reference), norm_loudness=normalize)
+                self.reference = reference_key
             torch.manual_seed(seed)
-            audio = self.model.generate(text).squeeze(0)
+            options = {key: settings[key] for key in ("temperature", "top_p", "top_k", "repetition_penalty")} if settings else {}
+            audio = self.model.generate(text, **options).squeeze(0)
 
         if not audio.numel() or not torch.isfinite(audio).all() or not audio.abs().max().item():
             raise AudioError("The model returned unusable audio. Try a shorter section or a new reference.")

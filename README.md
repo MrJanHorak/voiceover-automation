@@ -2,6 +2,8 @@
 
 This project runs a private browser studio for turning scripts into recordings in your voice. The command-line voice trial is also available for short model comparisons. See [plan.md](plan.md) for the project milestones and [AGENTS.md](AGENTS.md) for development instructions.
 
+For the latest project status and how to resume in a new chat, see [Current handoff](plan.md#current-handoff--2026-11-18). The studio is local-only at present; the owner has verified Word import, while listening comparisons of the newest GPU and advanced settings are still outstanding.
+
 ## Start the browser studio
 
 If the existing Python environment and model files are in place, start the studio from the project directory in PowerShell.
@@ -66,6 +68,10 @@ The optional runtime and model are Apache-2.0 licensed. Linux users can supply c
 2. Paste text or use **Import script** to load a UTF-8 `.txt`, `.docx`, or text-based `.pdf` file. Files can be up to 10 MB and extracted scripts can be up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
 
+The studio saves multiple references but uses one selected reference per job. A tool to combine excerpts from multiple recordings is an unimplemented experiment discussed in the plan. Chatterbox caches its prepared reference while the engine remains loaded, but prepares it again after a reference or normalization change, a restart, or unloading the GPU model. Both current VoxCPM2 paths prepare the reference for each section; the GPU path also starts a new model process per section. None of these steps permanently trains the model on the reference.
+
+After regenerating a section, open **All takes** inside that section to play and compare its current and earlier takes. Select **Use this take** to restore an earlier version and rebuild the finished WAV and MP3 without generating speech again. Its saved words and instructions return with it. If regeneration fails, you can also choose a saved take instead of retrying. Takes stay on your computer until you delete their recording and use additional disk space. Takes generated before this feature are only available when the studio still has their information; files from earlier regenerations were not indexed and cannot be listed automatically. For an older interrupted edit whose original words are unknown, the audio can be played but cannot be restored.
+
 Open a completed section to see the voice reference, engine, and device used for its current audio. New recordings also retain the runtime version, seed, and SHA-256 of the primary model file locally for troubleshooting and comparisons. Reading a large model file to identify it may add time to the first recording after the studio starts. Older sections show that their engine details are unavailable; their audio is unchanged. The reference listed for a recording remains the one selected when that recording was created, even if you switch the active reference later.
 
 Review imported text and reading order before generating. Word extraction includes body paragraphs and tables. Headers, footers, text boxes, and tracked changes may be omitted. Image-only or scanned PDFs need text recognition before import. PDFs with some textless pages show a notice so you can check for missing material.
@@ -81,6 +87,12 @@ Use **Choose an example** or write delivery directions under **Special instructi
 To plan different deliveries before generating, add blank lines where you want sections, then select **Prepare sections**. Each section has its own text, sound menu, and special instructions. You can edit, add, or remove sections before generating. Sound cues and instructions apply to separate sections. The sound menu includes the vocal sounds documented for Chatterbox and experimental delivery tags that may have little audible effect.
 
 Special instructions accept your own plain-language description of emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 tries to follow the instructions, and the result can vary, so listen to each take.
+
+### Advanced Chatterbox settings
+
+Open **Advanced Chatterbox settings** below the script to adjust seed, temperature, Top P, Top K, repetition penalty, and reference loudness normalization. Select the question mark beside a control for an explanation. These settings apply to Chatterbox sections; sections with special instructions use VoxCPM2 instead. Open a completed section to change its settings when regenerating; the settings and actual seed for new takes appear in **All takes**. The initial seed defaults to `35` to preserve the studio's previous behavior; `0` selects a new random seed, and regeneration starts with `0` for variety. Using a fixed seed can help repeat a take, but results can vary across devices or runtime versions.
+
+Reference loudness normalization adjusts the reference toward −27 LUFS before Chatterbox analyzes it. It is separate from the studio's output balancing at −20 LUFS, which applies to both models. The Min P control shown in the online demo is not offered because this installed Turbo version ignores it. Top P starts at 0.01 because its sampler requires a value greater than zero. See the [Resemble demo source](https://huggingface.co/spaces/ResembleAI/chatterbox-turbo-demo/blob/main/app.py) and [Turbo implementation](https://github.com/resemble-ai/chatterbox/blob/master/src/chatterbox/tts_turbo.py).
 
 For a fresh directed installation, complete the Chatterbox model download from the trial setup below and run the PowerShell commands from the project directory. VoxCPM2 2.0.3 uses the pinned Apache-2.0 checkpoint below. Allow about 5 GB for its model files. Runtime synthesis stays offline. [VoxCPM2 model card](https://huggingface.co/openbmb/VoxCPM2)
 

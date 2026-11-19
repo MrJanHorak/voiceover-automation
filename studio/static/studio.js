@@ -22,6 +22,10 @@ let prepared = null;
 const sectionDrafts = new Map();
 const pauseDrafts = new Map();
 const instructionDrafts = new Map();
+const turboDrafts = new Map();
+
+const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
+  repetition_penalty: 1.2, normalize_reference: true };
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -64,7 +68,60 @@ function updateEditor() {
   scriptSounds.disabled = directed;
   const ready = prepared ? prepared.every((part) => part.text.trim() && (!part.instructions.trim() || directedAvailable))
     : Boolean(script.value.trim()) && (!directed || directedAvailable);
-  byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready;
+  byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready || !scriptAdvanced.valid();
+}
+
+function advancedEditor(prefix, values, onChange, readOnly = false) {
+  const box = element("details", "advanced-settings");
+  box.append(element("summary", "", "Advanced Chatterbox settings"));
+  box.append(element("p", "muted advanced-intro", "Applies to Chatterbox sections only. Sections with special instructions use VoxCPM2. Change one setting at a time and listen to the result."));
+  const controls = {};
+  const definitions = [
+    ["seed", "Seed", "number", 0, 2147483647, 1, "Use 0 for a random variation. The same nonzero seed and settings can help repeat a take; results can still differ across devices or model versions."],
+    ["temperature", "Temperature", "range", 0.05, 2, 0.05, "Lower values tend to make delivery more predictable. Higher values add variation and may introduce artifacts. This is not a direct emotion control."],
+    ["top_p", "Top P", "range", 0.01, 1, 0.01, "Limits choices to the most likely sounds. Lower values narrow the choices; 1 considers the full set."],
+    ["top_k", "Top K", "range", 0, 1000, 1, "Limits how many possible sounds are considered at each step. Lower values narrow the choices; 0 disables this limit."],
+    ["repetition_penalty", "Repetition penalty", "range", 1, 2, 0.05, "Discourages repeating the same sounds. Higher values may reduce loops but can also affect natural delivery."],
+    ["normalize_reference", "Normalize reference loudness", "checkbox", null, null, null, "Adjusts the reference recording toward −27 LUFS before Chatterbox analyzes it. This can change the clone; it is separate from the studio's output volume balancing."],
+  ];
+  for (const [key, labelText, kind, min, max, step, explanation] of definitions) {
+    const row = element("div", "advanced-row");
+    const heading = element("div", "advanced-heading");
+    const label = element("label", "", labelText);
+    const field = document.createElement("input");
+    field.type = kind;
+    if (kind !== "checkbox") field.required = true;
+    field.id = `${prefix}-${key}`;
+    label.htmlFor = field.id;
+    if (min !== null) { field.min = min; field.max = max; field.step = step; }
+    if (kind === "checkbox") field.checked = values[key];
+    else field.value = values[key];
+    field.disabled = readOnly;
+    controls[key] = field;
+    const help = element("details", "setting-help");
+    const helpButton = element("summary", "", "?");
+    helpButton.setAttribute("aria-label", `About ${labelText}`);
+    help.append(helpButton, element("p", "", explanation));
+    heading.append(label, help);
+    if (kind === "range") {
+      const output = element("output", "advanced-value", field.value);
+      output.htmlFor = field.id;
+      field.addEventListener("input", () => { output.value = field.value; onChange(); });
+      heading.append(output);
+    } else {
+      field.addEventListener("input", onChange);
+      field.addEventListener("change", onChange);
+    }
+    row.append(heading, field);
+    box.append(row);
+  }
+  box.append(element("p", "muted advanced-note", "Min P is not supported by this installed Turbo version. Output loudness is balanced separately by the studio."));
+  return {
+    box,
+    valid: () => Object.values(controls).every((field) => field.validity.valid),
+    value: () => Object.fromEntries(Object.entries(controls).map(([key, field]) =>
+      [key, field.type === "checkbox" ? field.checked : field.valueAsNumber])),
+  };
 }
 
 function cuePicker(field, errorId) {
@@ -359,10 +416,13 @@ function renderSections(entry) {
     const sounds = cuePicker(field, "result-error");
     const directions = instructionsEditor(`section-instructions-${section.number}`,
       instructionDrafts.get(key) ?? section.instructions ?? "", field.readOnly);
+    const advanced = advancedEditor(`section-advanced-${section.number}`,
+      turboDrafts.get(key) ?? { ...turboDefaults, ...(section.turbo_settings || {}), seed: 0 },
+      () => { turboDrafts.set(key, advanced.value()); updateActions(); }, field.readOnly);
     const updateActions = () => {
       const directed = Boolean(directions.field.value.trim());
       sounds.disabled = field.readOnly || directed;
-      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable);
+      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid();
     };
     field.addEventListener("input", () => {
       sectionDrafts.set(key, field.value);
@@ -377,10 +437,11 @@ function renderSections(entry) {
       errorAt("result-error");
       try {
         await change(`/api/jobs/${entry.id}/sections/${section.number}`, {
-          value: { text: field.value, instructions: directions.field.value },
+          value: { text: field.value, instructions: directions.field.value, turbo_settings: advanced.value() },
         });
         sectionDrafts.delete(key);
         instructionDrafts.delete(key);
+        turboDrafts.delete(key);
         await refreshJob();
       } catch (error) {
         errorAt("result-error", error.message);
@@ -390,7 +451,53 @@ function renderSections(entry) {
     const actions = element("div", "section-actions");
     actions.append(sounds, redo);
     updateActions();
-    box.append(label, field, directions.box, actions);
+    box.append(label, field, directions.box, advanced.box, actions);
+    if ((section.takes?.length || 0) > 1 || (section.pending && section.takes?.length)) {
+      const history = element("details", "take-history");
+      history.append(element("summary", "", `All takes (${section.takes.length})`));
+      section.takes.forEach((take, takeIndex) => {
+        const item = element("div", "take-item");
+        const selectedTake = take.current && !section.pending;
+        item.append(element("strong", "", selectedTake ? "Current take" : `Take ${section.takes.length - takeIndex}`));
+        const info = [take.engine, take.device?.toUpperCase()].filter(Boolean).join(" · ");
+        if (info) item.append(element("p", "muted", info));
+        item.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
+        if (take.instructions) item.append(element("p", "muted", `Instructions: ${take.instructions}`));
+        if (take.turbo_settings && !take.instructions) {
+          const setting = take.turbo_settings;
+          item.append(element("p", "muted", `Seed ${take.seed} · Temperature ${setting.temperature} · Top P ${setting.top_p} · Top K ${setting.top_k} · Repetition ${setting.repetition_penalty} · Reference normalization ${setting.normalize_reference ? "on" : "off"}`));
+        }
+        const player = element("audio");
+        player.controls = true;
+        player.preload = "none";
+        player.setAttribute("aria-label", `Section ${section.number} take ${section.takes.length - takeIndex}`);
+        player.src = `/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/audio`;
+        item.append(player);
+        if (!selectedTake) {
+          const restore = element("button", "button button-quiet", "Use this take");
+          restore.type = "button";
+          restore.disabled = !take.can_restore || !["ready", "failed"].includes(entry.status);
+          if (!take.can_restore) restore.title = "The words for this older take are unknown.";
+          restore.addEventListener("click", async () => {
+            restore.disabled = true;
+            errorAt("result-error");
+            try {
+              await change(`/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/restore`);
+              sectionDrafts.delete(key);
+              instructionDrafts.delete(key);
+              turboDrafts.delete(key);
+              await refreshJob();
+            } catch (error) {
+              errorAt("result-error", error.message);
+              restore.disabled = false;
+            }
+          });
+          item.append(restore);
+        }
+        history.append(item);
+      });
+      box.append(history);
+    }
     if (index + 1 < entry.sections.length) box.append(pauseEditor(entry, section, key));
     return box;
   });
@@ -486,8 +593,10 @@ async function refresh() {
 
 const scriptSounds = cuePicker(script, "script-error");
 const scriptDirections = instructionsEditor("recording-instructions", "");
+const scriptAdvanced = advancedEditor("script-advanced-setting", turboDefaults, updateEditor);
 byId("script-cue").append(scriptSounds);
 byId("script-instructions").append(scriptDirections.box);
+byId("script-advanced").append(scriptAdvanced.box);
 
 script.addEventListener("input", updateEditor);
 scriptDirections.field.addEventListener("input", updateEditor);
@@ -520,8 +629,8 @@ byId("script-form").addEventListener("submit", async (event) => {
   try {
     const created = await change("/api/jobs", {
       value: prepared
-        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared }
-        : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value },
+        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared, turbo_settings: scriptAdvanced.value() }
+        : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value, turbo_settings: scriptAdvanced.value() },
     });
     await selectJob(created.id);
     await refresh();

@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
+from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
 
 
@@ -29,6 +31,7 @@ Directions = Annotated[str, StringConstraints(strip_whitespace=True, max_length=
 class SectionInput(BaseModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
     instructions: Directions | None = None
+    turbo_settings: TurboSettings | None = None
 
 
 class JobInput(BaseModel):
@@ -36,6 +39,7 @@ class JobInput(BaseModel):
     script: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SCRIPT_LIMIT)]
     instructions: Directions = ""
     sections: Annotated[list[SectionInput], Field(min_length=1, max_length=SCRIPT_LIMIT)] | None = None
+    turbo_settings: TurboSettings | None = None
 
 
 class PreviewInput(BaseModel):
@@ -79,7 +83,11 @@ def render_job(store, engine, directed, stop, job_id):
                     directed.render(*arguments, section["instructions"])
                     rendered_by = directed
                 else:
-                    engine.render(*arguments)
+                    settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
+                    if settings is None:
+                        engine.render(*arguments)
+                    else:
+                        engine.render(*arguments, settings=settings)
                     rendered_by = engine
                 details = None
                 if callable(getattr(rendered_by, "details", None)):
@@ -264,7 +272,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         else:
             validate_directions(data.script, data.instructions, directed.available)
             script = data.script
-        return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared)}
+        settings = data.turbo_settings.model_dump() if data.turbo_settings else None
+        return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings)}
 
     @app.post("/api/sections/preview", dependencies=mutations)
     def preview_sections(data: PreviewInput):
@@ -278,13 +287,21 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             "voice_reference": job["voice_label"],
             "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms")},
                           "generation": {key: section[f"rendered_{key}"] for key in
-                                         ("engine", "device", "runtime", "model_sha256", "seed", "at")}}
+                                         ("engine", "device", "runtime", "model_sha256", "seed", "at")},
+                          "turbo_settings": json.loads(section["turbo_settings"]) if section["turbo_settings"] else None,
+                          "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at")},
+                                     "seed": take["seed"],
+                                     "turbo_settings": json.loads(take["turbo_settings"]) if take["turbo_settings"] else None,
+                                     "current": take["audio"] == section["audio"],
+                                     "can_restore": take["text"] is not None and take["instructions"] is not None}
+                                    for take in section["takes"]]}
                          for section in job["sections"]],
         }
 
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput):
-        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available)
+        settings = data.turbo_settings.model_dump() if data.turbo_settings else None
+        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings)
         return {"id": job_id.hex}
 
     @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)
@@ -312,6 +329,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
                     raise StudioError("This audio file could not be found.", 404)
                 return file_response(balanced_section(path), "audio/wav")
         raise StudioError("This section has no audio yet.", 404)
+
+    @app.get("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/audio")
+    def take_audio(job_id: UUID, number: int, take_id: UUID):
+        take = store.take(job_id.hex, number, take_id.hex)
+        path = store.recordings / job_id.hex / take["audio"]
+        if not path.is_file():
+            raise StudioError("This take's audio file could not be found.", 404)
+        return file_response(balanced_section(path), "audio/wav")
+
+    @app.post("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/restore", dependencies=mutations, status_code=202)
+    def restore_take(job_id: UUID, number: int, take_id: UUID):
+        store.restore_take(job_id.hex, number, take_id.hex)
+        return {"id": job_id.hex}
 
     @app.get("/api/jobs/{job_id}/export/{kind}")
     def audio_export(job_id: UUID, kind: Literal["wav", "mp3"], download: bool = False):

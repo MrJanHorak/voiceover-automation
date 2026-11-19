@@ -1,4 +1,5 @@
 import re
+import json
 import secrets
 import sqlite3
 import textwrap
@@ -112,6 +113,22 @@ class Store:
                     audio TEXT,
                     PRIMARY KEY (job_id, number)
                 );
+                CREATE TABLE IF NOT EXISTS section_takes (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    section_number INTEGER NOT NULL,
+                    audio TEXT NOT NULL,
+                    text TEXT,
+                    instructions TEXT,
+                    seed INTEGER,
+                    engine TEXT,
+                    device TEXT,
+                    runtime TEXT,
+                    model_sha256 TEXT,
+                    created_at TEXT,
+                    UNIQUE(job_id, section_number, audio),
+                    FOREIGN KEY (job_id, section_number) REFERENCES sections(job_id, number) ON DELETE CASCADE
+                );
             """)
             section_columns = {column["name"] for column in db.execute("PRAGMA table_info(sections)")}
             if "pause_ms" not in section_columns:
@@ -121,6 +138,10 @@ class Store:
                 """)
             if "instructions" not in section_columns:
                 db.execute("ALTER TABLE sections ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+            if "turbo_settings" not in section_columns:
+                db.execute("ALTER TABLE sections ADD COLUMN turbo_settings TEXT")
+            if "turbo_settings" not in {column["name"] for column in db.execute("PRAGMA table_info(section_takes)")}:
+                db.execute("ALTER TABLE section_takes ADD COLUMN turbo_settings TEXT")
             for name, kind in (("rendered_engine", "TEXT"), ("rendered_device", "TEXT"),
                                ("rendered_runtime", "TEXT"), ("rendered_model_sha256", "TEXT"),
                                ("rendered_seed", "INTEGER"), ("rendered_at", "TEXT")):
@@ -128,6 +149,16 @@ class Store:
                     db.execute(f"ALTER TABLE sections ADD COLUMN {name} {kind}")
             if "instructions" not in {column["name"] for column in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+            # Older databases know only the current audio. Pending edits may no longer match it.
+            db.execute("""
+                INSERT OR IGNORE INTO section_takes
+                    (id, job_id, section_number, audio, text, instructions, seed, engine, device, runtime, model_sha256, created_at)
+                SELECT lower(hex(randomblob(16))), job_id, number, audio,
+                    CASE WHEN pending = 0 THEN text END,
+                    CASE WHEN pending = 0 THEN instructions END,
+                    rendered_seed, rendered_engine, rendered_device, rendered_runtime, rendered_model_sha256, rendered_at
+                FROM sections WHERE audio IS NOT NULL
+            """)
             db.execute("""
                 UPDATE jobs SET status = 'failed', error = 'Generation was interrupted. Retry to continue.'
                 WHERE status = 'running'
@@ -177,7 +208,7 @@ class Store:
             return {"voice": self.active_voice(db), "voices": [dict(voice) for voice in voices],
                     "jobs": [dict(job) for job in jobs]}
 
-    def create_job(self, title, script, instructions="", prepared_sections=None):
+    def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None):
         sections = prepared_sections if prepared_sections is not None else [
             {"text": text, "instructions": instructions} for text in split_script(script)
         ]
@@ -194,8 +225,15 @@ class Store:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if any(section["instructions"] for section in sections) else ENGINE_VERSION,
                   now(), instructions))
-            db.executemany("INSERT INTO sections (job_id, number, text, instructions) VALUES (?, ?, ?, ?)",
-                           [(job_id, index, section["text"], section["instructions"]) for index, section in enumerate(sections, 1)])
+            settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
+            def selected_seed(section):
+                if section["instructions"]:
+                    return 35
+                selected = turbo_settings["seed"] if turbo_settings is not None else 35
+                return selected if selected else secrets.randbelow(2147483647) + 1
+            db.executemany("INSERT INTO sections (job_id, number, text, instructions, seed, turbo_settings) VALUES (?, ?, ?, ?, ?, ?)",
+                           [(job_id, index, section["text"], section["instructions"], selected_seed(section), settings_json)
+                            for index, section in enumerate(sections, 1)])
         return job_id
 
     def job(self, job_id):
@@ -207,6 +245,12 @@ class Store:
             job["sections"] = [dict(section) for section in db.execute(
                 "SELECT * FROM sections WHERE job_id = ? ORDER BY number", (job_id,),
             )]
+            takes = db.execute("SELECT * FROM section_takes WHERE job_id = ? ORDER BY rowid DESC", (job_id,)).fetchall()
+            by_section = {section["number"]: section for section in job["sections"]}
+            for section in job["sections"]:
+                section["takes"] = []
+            for take in takes:
+                by_section[take["section_number"]]["takes"].append(dict(take))
             return job
 
     @staticmethod
@@ -228,12 +272,56 @@ class Store:
     def finish_section(self, job_id, number, audio, details=None, seed=None):
         details = details or {}
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            section = db.execute("SELECT text, instructions, turbo_settings FROM sections WHERE job_id = ? AND number = ?",
+                                 (job_id, number)).fetchone()
+            if section is None:
+                raise StudioError("Section not found.", 404)
+            rendered_at = now()
+            db.execute("""
+                INSERT INTO section_takes
+                    (id, job_id, section_number, audio, text, instructions, seed, engine, device, runtime, model_sha256, created_at, turbo_settings)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (new_id(), job_id, number, audio, section["text"], section["instructions"], seed,
+                  details.get("engine"), details.get("device"), details.get("runtime"), details.get("model_sha256"), rendered_at,
+                  section["turbo_settings"]))
             db.execute("""
                 UPDATE sections SET pending = 0, audio = ?, rendered_engine = ?, rendered_device = ?,
                     rendered_runtime = ?, rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?
                 WHERE job_id = ? AND number = ?
             """, (audio, details.get("engine"), details.get("device"), details.get("runtime"),
-                  details.get("model_sha256"), seed, now(), job_id, number))
+                  details.get("model_sha256"), seed, rendered_at, job_id, number))
+
+    def take(self, job_id, number, take_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM section_takes WHERE id = ? AND job_id = ? AND section_number = ?",
+                             (take_id, job_id, number)).fetchone()
+            if row is None:
+                raise StudioError("Take not found.", 404)
+            return dict(row)
+
+    def restore_take(self, job_id, number, take_id):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self.get_job(db, job_id)["status"] not in {"ready", "failed"}:
+                raise StudioError("Wait for the recording to finish before choosing a take.", 409)
+            take = db.execute("SELECT * FROM section_takes WHERE id = ? AND job_id = ? AND section_number = ?",
+                              (take_id, job_id, number)).fetchone()
+            if take is None:
+                raise StudioError("Take not found.", 404)
+            if take["text"] is None or take["instructions"] is None:
+                raise StudioError("The words for this older take are unknown, so it cannot be restored.", 409)
+            if not (self.recordings / job_id / take["audio"]).is_file():
+                raise StudioError("This take's audio file could not be found.", 404)
+            db.execute("""
+                UPDATE sections SET text = ?, instructions = ?, seed = COALESCE(?, seed), pending = 0,
+                    audio = ?, rendered_engine = ?, rendered_device = ?, rendered_runtime = ?,
+                    rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?, turbo_settings = ?
+                WHERE job_id = ? AND number = ?
+            """, (take["text"], take["instructions"], take["seed"], take["audio"], take["engine"],
+                  take["device"], take["runtime"], take["model_sha256"], take["seed"], take["created_at"],
+                  take["turbo_settings"], job_id, number))
+            db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def finish_job(self, job_id, export):
         with self.connect() as db:
@@ -258,20 +346,26 @@ class Store:
                 raise StudioError("Wait for the recording to finish before updating its volume.", 409)
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
-    def regenerate(self, job_id, number, text, instructions=None, directed_available=False):
+    def regenerate(self, job_id, number, text, instructions=None, directed_available=False, turbo_settings=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if self.get_job(db, job_id)["status"] != "ready":
                 raise StudioError("Wait for the recording to finish before regenerating.", 409)
-            section = db.execute("SELECT instructions FROM sections WHERE job_id = ? AND number = ?",
+            section = db.execute("SELECT instructions, turbo_settings FROM sections WHERE job_id = ? AND number = ?",
                                  (job_id, number)).fetchone()
             if section is None:
                 raise StudioError("Section not found.", 404)
             instructions = section["instructions"] if instructions is None else instructions
             validate_directions(text, instructions, directed_available)
+            if turbo_settings is None and section["turbo_settings"]:
+                turbo_settings = json.loads(section["turbo_settings"])
+                turbo_settings["seed"] = 0
+            seed = turbo_settings["seed"] if turbo_settings and not instructions else 0
+            seed = seed if seed else secrets.randbelow(2147483647) + 1
+            settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             db.execute("""
-                UPDATE sections SET text = ?, instructions = ?, seed = ?, pending = 1 WHERE job_id = ? AND number = ?
-            """, (text, instructions, secrets.randbits(31), job_id, number))
+                UPDATE sections SET text = ?, instructions = ?, seed = ?, turbo_settings = ?, pending = 1 WHERE job_id = ? AND number = ?
+            """, (text, instructions, seed, settings_json, job_id, number))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def adjust_pause(self, job_id, number, pause_ms):
