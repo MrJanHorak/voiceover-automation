@@ -529,26 +529,35 @@ byId("script-file").addEventListener("change", async (event) => {
   event.target.value = "";
   if (!file) return;
   errorAt("script-error");
+  if (script.value.trim() && !window.confirm("Replace the current script with this file?")) return;
+  const original = script.value;
+  const button = byId("import-script");
+  button.disabled = true;
   try {
-    if (!file.name.toLowerCase().endsWith(".txt") || file.size > scriptLimit * 4 + 3) {
-      throw new Error("Choose a UTF-8 .txt script within the character limit.");
-    }
-    let imported;
-    try {
-      imported = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer()).trim();
-    } catch {
-      throw new Error("This file could not be read as UTF-8 text.");
-    }
+    if (!/\.(txt|docx|pdf)$/i.test(file.name)) throw new Error("Choose a .txt, .docx, or .pdf script.");
+    if (file.size > 10 * 1024 * 1024) throw new Error("Choose a script file under 10 MB.");
+    const data = new FormData();
+    data.append("file", file);
+    const result = await change("/api/scripts/import", { value: data });
+    const imported = result.text;
     if (!imported || imported.length > scriptLimit) {
       throw new Error(`Use a script of 1 to ${scriptLimit.toLocaleString()} characters.`);
     }
+    if (script.value !== original || prepared) {
+      throw new Error("The draft changed during import. Your draft was kept. Import the file again when ready.");
+    }
     script.value = imported;
     byId("imported-file").textContent = file.name;
-    if (!byId("recording-title").value.trim()) byId("recording-title").value = file.name.slice(0, -4).slice(0, 100);
+    const notice = byId("import-notice");
+    notice.textContent = result.warnings.join(" ");
+    notice.hidden = !result.warnings.length;
+    if (!byId("recording-title").value.trim()) byId("recording-title").value = file.name.replace(/\.(txt|docx|pdf)$/i, "").slice(0, 100);
     updateEditor();
     script.focus();
   } catch (error) {
     errorAt("script-error", error.message);
+  } finally {
+    button.disabled = Boolean(prepared);
   }
 });
 
@@ -603,6 +612,7 @@ byId("reuse-script").addEventListener("click", () => {
   setPrepared(null);
   byId("recording-title").value = job.title;
   byId("imported-file").textContent = "";
+  byId("import-notice").hidden = true;
   script.value = job.script;
   scriptDirections.field.value = job.instructions ?? "";
   updateEditor();

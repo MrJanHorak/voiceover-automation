@@ -33,12 +33,12 @@ The owner preferred `data/second-take.wav` for its emphasis and pauses. It came 
 
 ## Phase 1 · Private studio
 
-The local studio implements enrollment, pasted text and UTF-8 `.txt` import, section-by-section generation, review, retry, and WAV and MP3 downloads. It starts on loopback and keeps submitted scripts and recordings under the ignored `data/studio/` directory. Word and PDF import and private network hosting remain later steps.
+The local studio implements enrollment, pasted text, UTF-8 `.txt`, Word `.docx`, and text-based PDF import, section-by-section generation, review, retry, and WAV and MP3 downloads. It starts on loopback and keeps submitted scripts and recordings under the ignored `data/studio/` directory. Private network hosting remains a later step.
 
 ### Build the operator workflow
 
 - **Voice profile** takes the owner's reference WAV, validates duration and format, and keeps a normalized copy with an internal ID and revision. Let the owner replace the active reference without changing previous exports. Keep enrollment owner-only throughout both phases.
-- **Script editor** accepts pasted text or a UTF-8 `.txt` upload. Show the full editable text and the exact version queued. Add `.docx` and text-based `.pdf` import with local parsers once the basic workflow is working. Show extracted text for review and tell the operator when a scanned PDF has no extractable text. Set explicit upload and character limits based on the benchmark.
+- **Script editor** accepts pasted text and UTF-8 `.txt`, `.docx`, and text-based `.pdf` uploads. It shows extracted text for review, flags PDFs with no extractable text, and limits files to 10 MB and scripts to 12,000 characters.
 - **Generation** splits longer scripts at paragraph and sentence boundaries, with a bounded fallback for long sentences. Preserve the ordered chunks and avoid silent truncation. The worker loads the engine once, conditions on the selected voice profile, and renders one job at a time. Record progress and actionable failures, and let the operator retry a failed chunk. After a restart, mark interrupted jobs for retry. Store the engine and reference revision with each job.
 - **Review and export** provide browser playback for each chunk and for the assembled take. Let the operator correct pronunciation in the synthesis text or regenerate individual chunks. Assemble approved chunks in order with pauses and offer WAV and MP3. Use the source rate for the WAV master. Resample delivery copies only when requested. Keep the engine's watermarking enabled and preserve prior usable takes during regeneration.
 - **History and storage** provide status, playback, download, and deletion for local jobs. Store uploads, generated audio, and SQLite under `data/` or an explicitly configured private directory. Expose files by internal IDs through app routes. Keep private files out of static assets, logs, and Git.

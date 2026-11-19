@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
+from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
 
 
@@ -190,6 +191,11 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     @app.get("/api/state")
     def state():
         return {**store.state(), "reference_notice": app.state.reference_notice}
+
+    @app.post("/api/scripts/import", dependencies=mutations)
+    def import_script(file: Annotated[UploadFile, File()]):
+        contents = file.file.read(MAX_SCRIPT_FILE_BYTES + 1)
+        return extract_script(file.filename or "", contents)
 
     @app.post("/api/voice", dependencies=mutations, status_code=201)
     def enroll(audio: Annotated[UploadFile, File()],

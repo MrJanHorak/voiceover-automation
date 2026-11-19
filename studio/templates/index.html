@@ -26,8 +26,8 @@
       <section class="panel script-panel" aria-labelledby="script-heading">
         <div class="panel-heading">
           <h2 id="script-heading">Script</h2>
-          <button class="button button-quiet" id="import-script" type="button">Import .txt</button>
-          <input id="script-file" type="file" accept=".txt,text/plain" hidden>
+          <button class="button button-quiet" id="import-script" type="button">Import script</button>
+          <input id="script-file" type="file" accept=".txt,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
         </div>
         <form id="script-form">
           <label for="recording-title">Recording title <span class="muted">· Optional</span></label>
@@ -35,6 +35,7 @@
           <label for="script">Script text</label>
           <textarea id="script" rows="10" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
           <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
+          <p id="import-notice" class="muted instructions-hint" role="status" hidden></p>
           <p class="muted instructions-hint">Experimental delivery tags may have little audible effect. Vocal sounds are supported by Chatterbox.</p>
           <div id="script-instructions"></div>
           <div class="form-footer"><button class="button button-quiet" type="button" id="prepare-sections">Prepare sections</button></div>

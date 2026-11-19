@@ -21,8 +21,10 @@ For the Chatterbox-only installation, use the original environment.
 Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python and model setup from step 1 below, `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
 
 1. The studio imports `data\reference.wav` on the first run. Use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
-2. Paste text or use **Import .txt** to load a UTF-8 script of up to 12,000 characters. Edit the text and select **Generate voice-over**.
+2. Paste text or use **Import script** to load a UTF-8 `.txt`, `.docx`, or text-based `.pdf` file. Files can be up to 10 MB and extracted scripts can be up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
+
+Review imported text and reading order before generating. Word extraction includes body paragraphs and tables. Headers, footers, text boxes, and tracked changes may be omitted. Image-only or scanned PDFs need text recognition before import. PDFs with some textless pages show a notice so you can check for missing material.
 
 Use **Insert sound** in the script or a section to add a chuckle, laugh, or sigh. Listen to the result to check the effect. For a styled read, try a recording of your own voice in that delivery under **Saved references**. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
 
