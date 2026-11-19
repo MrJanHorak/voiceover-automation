@@ -1,10 +1,12 @@
 import os
 import math
+import gc
 import subprocess
 import wave
 from importlib.util import find_spec
 from math import gcd
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 
@@ -60,6 +62,16 @@ class TurboEngine:
         self.device = device
         self.model = None
         self.reference = None
+
+    def release(self):
+        """Free the CUDA model before running another memory-intensive engine."""
+        if self.device != "cuda" or self.model is None:
+            return
+        self.model = None
+        self.reference = None
+        gc.collect()
+        import torch
+        torch.cuda.empty_cache()
 
     def render(self, text, reference, seed, output):
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -129,6 +141,72 @@ class DirectedEngine:
             audio = resample_poly(audio, RATE // divisor, source_rate // divisor).astype(np.float32)
             audio = self.watermarker.apply_watermark(audio, sample_rate=RATE)
         sf.write(output, audio, RATE, subtype="PCM_16")
+
+
+class CudaDirectedEngine:
+    """Optional audio.cpp backend; each invocation releases GPU memory on exit."""
+
+    needs_exclusive_gpu = True
+
+    def __init__(self, executable: Path, model: Path):
+        self.executable = executable.resolve()
+        self.model = model.resolve()
+        self.watermarker = None
+
+    @property
+    def available(self):
+        return self.executable.is_file() and self.model.is_file() and find_spec("perth") is not None
+
+    def render(self, text, reference, seed, output, instructions):
+        if not self.available:
+            raise AudioError("Set up the optional VoxCPM2 GPU files using the README, or restart with its CPU setting.")
+        import numpy as np
+        import perth
+        import soundfile as sf
+        from scipy.signal import resample_poly
+
+        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
+        # Keep script and reference audio out of process arguments and temporary system directories.
+        with TemporaryDirectory(prefix=".directed-", dir=output.parent) as temporary:
+            folder = Path(temporary)
+            inputs, outputs = folder / "input", folder / "output"
+            inputs.mkdir()
+            outputs.mkdir()
+            (inputs / "section.txt").write_text(f"({direction}){text}", encoding="utf-8")
+            converted = folder / "reference.wav"
+            ffmpeg("-n", "-i", str(reference), "-vn", "-ac", "1", "-ar", "48000",
+                   "-c:a", "pcm_s16le", str(converted))
+            info = sf.info(converted)
+            # AudioVAE requires a capacity in blocks of 240,000 samples (five seconds at 48 kHz).
+            capacity = max(240000, math.ceil(info.frames / 240000) * 240000)
+            command = [str(self.executable), "--task", "tts", "--family", "voxcpm2",
+                       "--model", str(self.model), "--backend", "cuda",
+                       "--session-option", "voxcpm2.mem_saver=true",
+                       "--session-option", "voxcpm2.audiovae_tile_frames=128",
+                       "--session-option", f"voxcpm2.audiovae_encoder_sample_capacity={capacity}",
+                       "--request-option", f"seed={seed}",
+                       "--batch-text-dir", str(inputs), "--voice-ref", str(converted),
+                       "--out-dir", str(outputs)]
+            try:
+                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=1800, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise AudioError("VoxCPM2 GPU could not start or finish. Check its setup, or use the CPU setting.") from error
+            generated = outputs / "section.wav"
+            if result.returncode != 0 or not generated.is_file():
+                raise AudioError("VoxCPM2 GPU could not finish. Free GPU memory or restart with its CPU setting, then retry.")
+            try:
+                audio, source_rate = sf.read(generated, dtype="float32")
+            except (OSError, RuntimeError) as error:
+                raise AudioError("VoxCPM2 GPU returned an unreadable recording. Retry the section.") from error
+            if audio.ndim != 1 or not audio.size or not np.isfinite(audio).all() or not audio.any():
+                raise AudioError("VoxCPM2 GPU returned unusable audio. Try a shorter section.")
+            divisor = gcd(source_rate, RATE)
+            audio = resample_poly(audio, RATE // divisor, source_rate // divisor).astype(np.float32)
+            if self.watermarker is None:
+                self.watermarker = perth.PerthImplicitWatermarker()
+            audio = self.watermarker.apply_watermark(audio, sample_rate=RATE)
+            sf.write(output, audio, RATE, subtype="PCM_16")
 
 
 def balanced_section(source):

@@ -15,7 +15,7 @@ from filelock import FileLock
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .audio import MAX_REFERENCE_BYTES, AudioError, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
+from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
 
@@ -72,6 +72,10 @@ def render_job(store, engine, directed, stop, job_id):
             try:
                 arguments = (section["text"], reference, section["seed"], folder / filename)
                 if section["instructions"]:
+                    if getattr(directed, "needs_exclusive_gpu", False):
+                        release = getattr(engine, "release", None)
+                        if release:
+                            release()
                     directed.render(*arguments, section["instructions"])
                 else:
                     engine.render(*arguments)
@@ -124,8 +128,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     data_dir = Path(data_dir or os.environ.get("VOICEOVER_DATA_DIR", PROJECT / "data")).resolve()
     store = Store(data_dir / "studio")
     device = os.environ.get("VOICEOVER_DEVICE", "cpu")
+    directed_device = os.environ.get("VOICEOVER_DIRECTED_DEVICE", "cpu").lower()
+    if directed_device not in {"cpu", "cuda"}:
+        raise ValueError("VOICEOVER_DIRECTED_DEVICE must be cpu or cuda")
     templates = Jinja2Templates(directory=PACKAGE / "templates")
-    directed = directed_engine if directed_engine is not None else DirectedEngine(PROJECT / "models" / "voxcpm2")
+    if directed_engine is not None:
+        directed = directed_engine
+    elif directed_device == "cuda":
+        executable = "audiocpp_cli.exe" if os.name == "nt" else "audiocpp_cli"
+        runtime = Path(os.environ.get("VOICEOVER_AUDIOCPP_PATH", PROJECT / ".tools" / "audio-cpp" / executable))
+        weights = Path(os.environ.get("VOICEOVER_VOXCPM2_GGUF", PROJECT / "models" / "voxcpm2-gguf" / "voxcpm2-q8_0.gguf"))
+        directed = CudaDirectedEngine(runtime, weights)
+    else:
+        directed = DirectedEngine(PROJECT / "models" / "voxcpm2")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -180,7 +195,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     def home(request: Request):
         return templates.TemplateResponse(request=request, name="index.html", context={
             "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
-            "device": device, "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
+            "device": device, "directed_device": directed_device,
+            "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
         })
 
     @app.get("/assets/{asset}")
