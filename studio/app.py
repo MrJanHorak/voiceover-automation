@@ -16,7 +16,7 @@ from filelock import FileLock
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
+from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
@@ -48,6 +48,17 @@ class PreviewInput(BaseModel):
 
 class PauseInput(BaseModel):
     pause_ms: Annotated[int, Field(strict=True, ge=0, le=MAX_PAUSE_MS)]
+
+
+class ReferenceExcerpt(BaseModel):
+    voice_id: UUID
+    start: Annotated[float, Field(ge=0, le=30, allow_inf_nan=False)]
+    end: Annotated[float, Field(gt=0, le=30, allow_inf_nan=False)]
+
+
+class ReferenceMix(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
+    excerpts: Annotated[list[ReferenceExcerpt], Field(min_length=1, max_length=20)]
 
 
 def install_voice(store, source, label):
@@ -240,6 +251,34 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             source = Path(temporary) / "upload.wav"
             source.write_bytes(contents)
             result = install_voice(store, source, label)
+        app.state.reference_notice = None
+        return result
+
+    def build_reference(data: ReferenceMix):
+        available = {voice["id"] for voice in store.state()["voices"]}
+        if any(item.voice_id.hex not in available for item in data.excerpts):
+            raise StudioError("A selected reference could not be found.", 404)
+        return combine_reference_excerpts([
+            (store.voices / f"{item.voice_id.hex}.wav", item.start, item.end)
+            for item in data.excerpts
+        ])
+
+    @app.post("/api/voice/combine/preview", dependencies=mutations)
+    def preview_reference(data: ReferenceMix):
+        audio, _ = build_reference(data)
+        return Response(audio, media_type="audio/wav")
+
+    @app.post("/api/voice/combine", dependencies=mutations, status_code=201)
+    def save_combined_reference(data: ReferenceMix):
+        audio, duration = build_reference(data)
+        voice_id = new_id()
+        destination = store.voices / f"{voice_id}.wav"
+        try:
+            destination.write_bytes(audio)
+            result = store.add_voice(voice_id, data.name or "Combined reference", duration)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
         app.state.reference_notice = None
         return result
 

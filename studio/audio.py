@@ -4,6 +4,7 @@ import gc
 import hashlib
 import subprocess
 import wave
+from io import BytesIO
 from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from math import gcd
@@ -79,6 +80,40 @@ def prepare_reference(source, destination):
     ffmpeg("-n", "-i", str(source), "-vn", "-ac", "1", "-ar", str(RATE),
            "-c:a", "pcm_s16le", str(destination))
     return round(seconds, 1)
+
+
+def combine_reference_excerpts(excerpts):
+    """Join bounded excerpts of normalized saved references without changing them."""
+    output = BytesIO()
+    total_frames = 0
+    pieces = []
+    try:
+        for path, start, end in excerpts:
+            with wave.open(str(path), "rb") as source:
+                if (source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype()) != (1, 2, RATE, "NONE"):
+                    raise AudioError("A saved reference has an unexpected format.")
+                first, last = round(start * RATE), round(end * RATE)
+                if first < 0 or last <= first or last > source.getnframes():
+                    raise AudioError("Check each excerpt's start and end against the recording length.")
+                total_frames += last - first
+                if total_frames > 30 * RATE:
+                    raise AudioError("The combined reference must be 6 to 30 seconds.")
+                source.setpos(first)
+                piece = source.readframes(last - first)
+                if len(piece) != (last - first) * 2:
+                    raise AudioError("A saved reference could not be read completely.")
+                pieces.append(piece)
+        if total_frames < 6 * RATE:
+            raise AudioError("The combined reference must be 6 to 30 seconds.")
+        if not any(any(piece) for piece in pieces):
+            raise AudioError("The selected excerpts are silent.")
+        with wave.open(output, "wb") as combined:
+            combined.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
+            for piece in pieces:
+                combined.writeframesraw(piece)
+    except (OSError, EOFError, wave.Error) as error:
+        raise AudioError("A saved reference could not be read.") from error
+    return output.getvalue(), round(total_frames / RATE, 1)
 
 
 class TurboEngine(ModelDetails):

@@ -82,6 +82,23 @@
               <span class="muted">6–30 seconds</span>
             </div>
           </details>
+          <details id="reference-builder" class="reference-enrollment">
+            <summary>Combine reference excerpts</summary>
+            <p class="muted instructions-hint">Choose excerpts in the order you want to hear them. Aim for 10–15 seconds; the combined reference must be 6–30 seconds. Originals stay unchanged.</p>
+            <label for="mix-name">New reference name <span class="muted">· Optional</span></label>
+            <input id="mix-name" maxlength="100" placeholder="e.g. Combined narration">
+            <div id="mix-excerpts" class="section-list"></div>
+            <div class="form-footer">
+              <button class="button button-quiet" id="mix-add" type="button">Add excerpt</button>
+              <button class="button button-quiet" id="mix-preview" type="button">Preview combination</button>
+            </div>
+            <p id="mix-error" class="error" role="alert" hidden></p>
+            <div id="mix-result" hidden>
+              <p class="muted">Listen for clean joins and natural speech before saving.</p>
+              <audio id="mix-audio" controls aria-label="Combined reference preview"></audio>
+              <button class="button button-primary" id="mix-save" type="button">Save as new reference</button>
+            </div>
+          </details>
         </section>
 
         <section class="panel result-panel" aria-labelledby="result-heading">

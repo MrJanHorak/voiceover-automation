@@ -18,6 +18,8 @@ let polling = false;
 let submitting = false;
 let referenceBusy = false;
 let voiceRevision = 0;
+let mixRevision = 0;
+let mixPreviewUrl = null;
 let prepared = null;
 const sectionDrafts = new Map();
 const pauseDrafts = new Map();
@@ -236,7 +238,104 @@ function renderVoice() {
     audio.load();
   }
   errorAt("voice-error", state.reference_notice);
+  byId("mix-add").disabled = !state.voices.length || byId("mix-excerpts").children.length >= 20;
 }
+
+function invalidateMix() {
+  mixRevision++;
+  byId("mix-result").hidden = true;
+  byId("mix-audio").pause();
+  byId("mix-audio").removeAttribute("src");
+  if (mixPreviewUrl) URL.revokeObjectURL(mixPreviewUrl);
+  mixPreviewUrl = null;
+  errorAt("mix-error");
+}
+
+function addMixExcerpt() {
+  if (!state.voices.length || byId("mix-excerpts").children.length >= 20) return;
+  invalidateMix();
+  const row = element("div", "section mix-excerpt");
+  const label = element("label", "", "Saved reference");
+  const select = document.createElement("select");
+  select.setAttribute("aria-label", "Saved reference for excerpt");
+  select.replaceChildren(...state.voices.map((voice) => new Option(`${voice.label} · ${voice.duration.toFixed(1)} s`, voice.id)));
+  const player = element("audio");
+  player.controls = true;
+  player.preload = "metadata";
+  player.setAttribute("aria-label", "Listen to source reference");
+  const fields = element("div", "mix-times");
+  const startLabel = element("label", "", "Start (seconds)");
+  const endLabel = element("label", "", "End (seconds)");
+  const start = document.createElement("input");
+  const end = document.createElement("input");
+  for (const field of [start, end]) {
+    field.type = "number"; field.min = "0"; field.max = "30"; field.step = "0.01"; field.required = true;
+    field.addEventListener("input", invalidateMix);
+  }
+  start.value = "0";
+  function selectVoice() {
+    player.src = `/api/voice/${select.value}/audio`;
+    const voice = state.voices.find((item) => item.id === select.value);
+    end.value = Math.min(5, Math.floor(voice.duration * 10) / 10);
+    start.value = "0";
+    invalidateMix();
+  }
+  select.addEventListener("change", selectVoice);
+  startLabel.append(start); endLabel.append(end); fields.append(startLabel, endLabel);
+  const remove = element("button", "button button-quiet", "Remove excerpt");
+  remove.type = "button";
+  remove.addEventListener("click", () => { row.remove(); invalidateMix(); byId("mix-add").disabled = false; });
+  label.append(select);
+  row.append(label, player, fields, remove);
+  byId("mix-excerpts").append(row);
+  selectVoice();
+  byId("mix-add").disabled = byId("mix-excerpts").children.length >= 20;
+}
+
+function mixPayload() {
+  return { name: byId("mix-name").value.trim(), excerpts: [...byId("mix-excerpts").children].map((row) => {
+    const fields = row.querySelectorAll("input");
+    return { voice_id: row.querySelector("select").value, start: fields[0].valueAsNumber, end: fields[1].valueAsNumber };
+  }) };
+}
+
+byId("mix-add").addEventListener("click", addMixExcerpt);
+byId("reference-builder").addEventListener("toggle", () => {
+  if (byId("reference-builder").open && !byId("mix-excerpts").children.length && state.voices.length) addMixExcerpt();
+});
+byId("mix-preview").addEventListener("click", async () => {
+  invalidateMix();
+  const revision = mixRevision;
+  const button = byId("mix-preview");
+  button.disabled = true;
+  try {
+    const response = await fetch("/api/voice/combine/preview", { method: "POST", headers: { "X-Studio-Request": "1", "Content-Type": "application/json" }, body: JSON.stringify(mixPayload()) });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || "Could not preview the combined reference.");
+    }
+    const blob = await response.blob();
+    if (revision !== mixRevision) return;
+    mixPreviewUrl = URL.createObjectURL(blob);
+    byId("mix-audio").src = mixPreviewUrl;
+    byId("mix-result").hidden = false;
+  } catch (error) {
+    if (revision === mixRevision) errorAt("mix-error", error.message);
+  } finally { button.disabled = false; }
+});
+byId("mix-save").addEventListener("click", async () => {
+  const button = byId("mix-save");
+  button.disabled = true;
+  const saved = await changeReference("/api/voice/combine", { value: mixPayload() });
+  if (saved) {
+    invalidateMix();
+    byId("mix-excerpts").replaceChildren();
+    byId("mix-name").value = "";
+    byId("reference-builder").open = false;
+    byId("mix-add").disabled = false;
+  } else errorAt("mix-error", byId("voice-error").textContent);
+  button.disabled = false;
+});
 
 async function changeReference(url, options) {
   if (referenceBusy) return false;
