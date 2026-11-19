@@ -77,9 +77,17 @@ def render_job(store, engine, directed, stop, job_id):
                         if release:
                             release()
                     directed.render(*arguments, section["instructions"])
+                    rendered_by = directed
                 else:
                     engine.render(*arguments)
-                store.finish_section(job_id, section["number"], filename)
+                    rendered_by = engine
+                details = None
+                if callable(getattr(rendered_by, "details", None)):
+                    try:
+                        details = rendered_by.details()
+                    except Exception as error:
+                        LOG.warning("Could not record model details (%s)", type(error).__name__)
+                store.finish_section(job_id, section["number"], filename, details, section["seed"])
             except Exception:
                 (folder / filename).unlink(missing_ok=True)
                 raise
@@ -267,7 +275,10 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         job = store.job(job_id.hex)
         return {
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
-            "sections": [{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms")}
+            "voice_reference": job["voice_label"],
+            "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms")},
+                          "generation": {key: section[f"rendered_{key}"] for key in
+                                         ("engine", "device", "runtime", "model_sha256", "seed", "at")}}
                          for section in job["sections"]],
         }
 

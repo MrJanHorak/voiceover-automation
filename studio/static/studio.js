@@ -335,6 +335,16 @@ function renderSections(entry) {
       audio.setAttribute("aria-label", `Section ${section.number} audio`);
       audio.src = `/api/jobs/${entry.id}/sections/${section.number}/audio?v=${section.audio}`;
       box.append(audio);
+      const details = section.generation || {};
+      const source = details.engine
+        ? [details.engine, details.device?.toUpperCase(), details.runtime].filter(Boolean).join(" · ")
+        : "Engine details unavailable";
+      const metadata = element("p", "muted section-metadata", `Voice reference: ${entry.voice_reference || "Unknown"} · ${source}`);
+      if (details.model_sha256) {
+        metadata.textContent += ` · Model ${details.model_sha256.slice(0, 12)}`;
+        metadata.title = `Primary model SHA-256: ${details.model_sha256}`;
+      }
+      box.append(metadata);
     }
     const label = element("label", "", "Text to speak");
     label.htmlFor = `section-text-${section.number}`;

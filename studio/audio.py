@@ -1,8 +1,10 @@
 import os
 import math
 import gc
+import hashlib
 import subprocess
 import wave
+from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 from math import gcd
 from pathlib import Path
@@ -19,6 +21,29 @@ MAX_GAIN = 48.0
 
 class AudioError(Exception):
     pass
+
+
+def package_version(name):
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
+class ModelDetails:
+    """Identify the primary local weight file without assuming its source revision."""
+
+    def model_hash(self, path):
+        try:
+            stat = path.stat()
+            key = (path, stat.st_size, stat.st_mtime_ns)
+            if getattr(self, "_model_hash_key", None) != key:
+                with path.open("rb") as weights:
+                    digest = hashlib.file_digest(weights, "sha256").hexdigest()
+                self._model_hash_key, self._model_hash = key, digest
+            return self._model_hash
+        except OSError:
+            return None
 
 
 def ffmpeg(*arguments):
@@ -56,12 +81,17 @@ def prepare_reference(source, destination):
     return round(seconds, 1)
 
 
-class TurboEngine:
+class TurboEngine(ModelDetails):
     def __init__(self, model_dir: Path, device: str):
         self.model_dir = model_dir
         self.device = device
         self.model = None
         self.reference = None
+
+    def details(self):
+        return {"engine": "Chatterbox Turbo", "device": self.device,
+                "runtime": package_version("chatterbox-tts"),
+                "model_sha256": self.model_hash(self.model_dir / "t3_turbo_v1.safetensors")}
 
     def release(self):
         """Free the CUDA model before running another memory-intensive engine."""
@@ -98,11 +128,15 @@ class TurboEngine:
         sf.write(output, audio.cpu().numpy(), self.model.sr, subtype="PCM_16")
 
 
-class DirectedEngine:
+class DirectedEngine(ModelDetails):
     def __init__(self, model_dir: Path):
         self.model_dir = model_dir
         self.model = None
         self.watermarker = None
+
+    def details(self):
+        return {"engine": "VoxCPM2", "device": "cpu", "runtime": package_version("voxcpm"),
+                "model_sha256": self.model_hash(self.model_dir / "model.safetensors")}
 
     @property
     def available(self):
@@ -143,7 +177,7 @@ class DirectedEngine:
         sf.write(output, audio, RATE, subtype="PCM_16")
 
 
-class CudaDirectedEngine:
+class CudaDirectedEngine(ModelDetails):
     """Optional audio.cpp backend; each invocation releases GPU memory on exit."""
 
     needs_exclusive_gpu = True
@@ -152,6 +186,18 @@ class CudaDirectedEngine:
         self.executable = executable.resolve()
         self.model = model.resolve()
         self.watermarker = None
+
+    def details(self):
+        if not hasattr(self, "_runtime_version"):
+            try:
+                result = subprocess.run([str(self.executable), "--version"], capture_output=True,
+                                        text=True, timeout=10, check=True,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                self._runtime_version = result.stdout.splitlines()[0][:100] if result.stdout else None
+            except (OSError, subprocess.SubprocessError):
+                self._runtime_version = None
+        return {"engine": "VoxCPM2 Q8", "device": "cuda", "runtime": self._runtime_version,
+                "model_sha256": self.model_hash(self.model)}
 
     @property
     def available(self):

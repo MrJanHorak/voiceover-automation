@@ -121,6 +121,11 @@ class Store:
                 """)
             if "instructions" not in section_columns:
                 db.execute("ALTER TABLE sections ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+            for name, kind in (("rendered_engine", "TEXT"), ("rendered_device", "TEXT"),
+                               ("rendered_runtime", "TEXT"), ("rendered_model_sha256", "TEXT"),
+                               ("rendered_seed", "INTEGER"), ("rendered_at", "TEXT")):
+                if name not in section_columns:
+                    db.execute(f"ALTER TABLE sections ADD COLUMN {name} {kind}")
             if "instructions" not in {column["name"] for column in db.execute("PRAGMA table_info(jobs)")}:
                 db.execute("ALTER TABLE jobs ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
             db.execute("""
@@ -197,6 +202,8 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN")
             job = dict(self.get_job(db, job_id))
+            voice = db.execute("SELECT label FROM voices WHERE id = ?", (job["voice_id"],)).fetchone()
+            job["voice_label"] = voice["label"] if voice else None
             job["sections"] = [dict(section) for section in db.execute(
                 "SELECT * FROM sections WHERE job_id = ? ORDER BY number", (job_id,),
             )]
@@ -218,10 +225,15 @@ class Store:
             """).fetchone()
             return row["id"] if row else None
 
-    def finish_section(self, job_id, number, audio):
+    def finish_section(self, job_id, number, audio, details=None, seed=None):
+        details = details or {}
         with self.connect() as db:
-            db.execute("UPDATE sections SET pending = 0, audio = ? WHERE job_id = ? AND number = ?",
-                       (audio, job_id, number))
+            db.execute("""
+                UPDATE sections SET pending = 0, audio = ?, rendered_engine = ?, rendered_device = ?,
+                    rendered_runtime = ?, rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?
+                WHERE job_id = ? AND number = ?
+            """, (audio, details.get("engine"), details.get("device"), details.get("runtime"),
+                  details.get("model_sha256"), seed, now(), job_id, number))
 
     def finish_job(self, job_id, export):
         with self.connect() as db:
