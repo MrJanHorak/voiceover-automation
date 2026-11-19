@@ -26,6 +26,8 @@ Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python an
 
 Use **Insert sound** in the script or a section to add a chuckle, laugh, or sigh. Listen to the result to check the effect. For a styled read, try a recording of your own voice in that delivery under **Saved references**. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
 
+The studio balances the loudness of each section for playback and exports. It keeps the original generated sections and adjusts their gain toward −20 LUFS with peak headroom. Peak limits and very short or quiet clips can affect the final level. For a recording created before this feature, open it in history and select **Balance volume** to rebuild its WAV and MP3 from its saved sections.
+
 ### Special instructions
 
 Use **Choose an example** or write delivery directions under **Special instructions**. Instructions above **Generate voice-over** apply to the whole script. To direct one section, open it, edit its instructions, and select **Regenerate section**. An empty instructions field uses Chatterbox Turbo. A filled field uses VoxCPM2 on the CPU with the saved voice reference. Use plain dialogue for VoxCPM2 and put directions in the instructions field. Bracketed sound cues are for Chatterbox Turbo. Directed reads can take substantially longer on the CPU, especially when the model first loads.

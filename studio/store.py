@@ -239,6 +239,13 @@ class Store:
                 raise StudioError("Only a failed recording can be retried.", 409)
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
+    def rebuild(self, job_id):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self.get_job(db, job_id)["status"] != "ready":
+                raise StudioError("Wait for the recording to finish before updating its volume.", 409)
+            db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
+
     def regenerate(self, job_id, number, text, instructions=None, directed_available=False):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")

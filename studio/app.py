@@ -15,7 +15,7 @@ from filelock import FileLock
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .audio import MAX_REFERENCE_BYTES, AudioError, DirectedEngine, TurboEngine, export_audio, prepare_reference
+from .audio import MAX_REFERENCE_BYTES, AudioError, DirectedEngine, TurboEngine, balanced_section, export_audio, prepare_reference
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
 
 
@@ -264,12 +264,20 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         store.retry(job_id.hex)
         return {"id": job_id.hex}
 
+    @app.post("/api/jobs/{job_id}/balance", dependencies=mutations, status_code=202)
+    def balance(job_id: UUID):
+        store.rebuild(job_id.hex)
+        return {"id": job_id.hex}
+
     @app.get("/api/jobs/{job_id}/sections/{number}/audio")
     def section_audio(job_id: UUID, number: int):
         job = store.job(job_id.hex)
         for section in job["sections"]:
             if section["number"] == number and section["audio"]:
-                return file_response(store.recordings / job_id.hex / section["audio"], "audio/wav")
+                path = store.recordings / job_id.hex / section["audio"]
+                if not path.is_file():
+                    raise StudioError("This audio file could not be found.", 404)
+                return file_response(balanced_section(path), "audio/wav")
         raise StudioError("This section has no audio yet.", 404)
 
     @app.get("/api/jobs/{job_id}/export/{kind}")

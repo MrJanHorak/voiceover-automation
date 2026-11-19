@@ -393,6 +393,8 @@ function renderJob(entry) {
   status.hidden = !entry;
   byId("retry").hidden = entry?.status !== "failed";
   byId("retry").disabled = false;
+  byId("balance").hidden = entry?.status !== "ready" || !entry?.export;
+  byId("balance").disabled = false;
   errorAt("result-error", entry?.error);
   if (!entry) {
     message.textContent = "Generate a voice-over to play and download it here.";
@@ -576,6 +578,18 @@ byId("retry").addEventListener("click", async (event) => {
   event.target.disabled = true;
   try {
     await change(`/api/jobs/${id}/retry`);
+    await refreshJob();
+  } catch (error) {
+    errorAt("result-error", error.message);
+    event.target.disabled = false;
+  }
+});
+
+byId("balance").addEventListener("click", async (event) => {
+  const id = selected;
+  event.target.disabled = true;
+  try {
+    await change(`/api/jobs/${id}/balance`);
     await refreshJob();
   } catch (error) {
     errorAt("result-error", error.message);

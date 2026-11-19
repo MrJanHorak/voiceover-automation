@@ -1,13 +1,18 @@
 import os
+import math
 import subprocess
 import wave
 from importlib.util import find_spec
 from math import gcd
 from pathlib import Path
+from uuid import uuid4
 
 
 MAX_REFERENCE_BYTES = 16 * 1024 * 1024
 RATE = 24000
+TARGET_LOUDNESS = -20.0
+PEAK_LIMIT = -2.0
+MAX_GAIN = 48.0
 
 
 class AudioError(Exception):
@@ -126,11 +131,46 @@ class DirectedEngine:
         sf.write(output, audio, RATE, subtype="PCM_16")
 
 
+def balanced_section(source):
+    """Create a level-matched preview while keeping the generated section intact."""
+    import numpy as np
+    import pyloudnorm
+    import soundfile as sf
+    from scipy.signal import resample_poly
+
+    destination = source.with_name(f"balanced-v1-{source.name}")
+    if destination.is_file():
+        return destination
+    audio, rate = sf.read(source, dtype="float64")
+    if audio.ndim != 1 or rate != RATE or not audio.size or not np.isfinite(audio).all():
+        raise AudioError("A section has an unexpected audio format. Regenerate that section.")
+    if not audio.any():
+        raise AudioError("A section is silent. Regenerate that section.")
+    # R128 measures 400 ms blocks. Pad a short section for measurement only.
+    measured = np.pad(audio, (0, max(0, int(rate * 0.4) - audio.size)))
+    loudness = pyloudnorm.Meter(rate).integrated_loudness(measured)
+    if not math.isfinite(loudness):
+        rms = float(np.sqrt(np.mean(audio * audio)))
+        loudness = 20 * math.log10(rms)
+    # Four-times oversampling estimates inter-sample peaks before applying gain.
+    peak = float(np.max(np.abs(resample_poly(audio, 4, 1))))
+    peak_db = 20 * math.log10(peak)
+    gain_db = min(TARGET_LOUDNESS - loudness, PEAK_LIMIT - peak_db, MAX_GAIN)
+    adjusted = audio * (10 ** (gain_db / 20))
+    temporary = destination.with_name(f".{destination.stem}-{uuid4().hex}.wav")
+    try:
+        sf.write(temporary, adjusted, rate, subtype="PCM_16")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def export_audio(chunks, wav_path, mp3_path):
     with wave.open(str(wav_path), "wb") as master:
         master.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
         for index, (path, pause_ms) in enumerate(chunks):
-            with wave.open(str(path), "rb") as chunk:
+            with wave.open(str(balanced_section(path)), "rb") as chunk:
                 if (chunk.getnchannels(), chunk.getsampwidth(), chunk.getframerate()) != (1, 2, RATE):
                     raise AudioError("A section has an unexpected audio format. Regenerate that section.")
                 master.writeframesraw(chunk.readframes(chunk.getnframes()))
