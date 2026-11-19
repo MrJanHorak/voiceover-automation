@@ -6,6 +6,14 @@ This project runs a private browser studio for turning scripts into recordings i
 
 If the existing Python environment and model files are in place, start the studio from the project directory in PowerShell.
 
+For the installation that includes **Special instructions**, use its local Python environment.
+
+```powershell
+.\.tools\directed-env\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+For the Chatterbox-only installation, use the original environment.
+
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
@@ -16,7 +24,28 @@ Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python an
 2. Paste text or use **Import .txt** to load a UTF-8 script of up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
 
-Use **Insert cue** in the script or a section to add prompts for delivery and vocal sounds. Listen to the result to check the effect. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
+Use **Insert sound** in the script or a section to add a chuckle, laugh, or sigh. Listen to the result to check the effect. For a styled read, try a recording of your own voice in that delivery under **Saved references**. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
+
+### Special instructions
+
+Use **Choose an example** or write delivery directions under **Special instructions**. Instructions above **Generate voice-over** apply to the whole script. To direct one section, open it, edit its instructions, and select **Regenerate section**. An empty instructions field uses Chatterbox Turbo. A filled field uses VoxCPM2 on the CPU with the saved voice reference. Use plain dialogue for VoxCPM2 and put directions in the instructions field. Bracketed sound cues are for Chatterbox Turbo. Directed reads can take substantially longer on the CPU, especially when the model first loads.
+
+To plan different deliveries before generating, add blank lines where you want sections, then select **Prepare sections**. Each section has its own text, sound menu, and special instructions. You can edit, add, or remove sections before generating. Sound cues and instructions apply to separate sections. The sound menu includes the vocal sounds documented for Chatterbox and experimental delivery tags that may have little audible effect.
+
+Special instructions accept your own plain-language description of emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 tries to follow the instructions, and the result can vary, so listen to each take.
+
+For a fresh directed installation, complete the Chatterbox model download from the trial setup below and run the PowerShell commands from the project directory. VoxCPM2 2.0.3 uses the pinned Apache-2.0 checkpoint below. Allow about 5 GB for its model files. Runtime synthesis stays offline. [VoxCPM2 model card](https://huggingface.co/openbmb/VoxCPM2)
+
+```powershell
+uv venv --python 3.11 .tools\directed-env
+$directedPython = '.\.tools\directed-env\Scripts\python.exe'
+uv pip install --python $directedPython --index-url https://download.pytorch.org/whl/cpu 'torch==2.6.0' 'torchaudio==2.6.0'
+uv pip install --python $directedPython -r requirements-directed.txt
+$env:HF_HUB_DISABLE_XET = '1'
+.\.tools\directed-env\Scripts\hf.exe download openbmb/VoxCPM2 `
+  audiovae.pth model.safetensors config.json special_tokens_map.json tokenization_voxcpm2.py tokenizer.json tokenizer_config.json `
+  --revision 7936080b41163874f38610f46f438e2c0757f9fd --local-dir .\models\voxcpm2
+```
 
 Recording history and private files live under `data\studio`. The web server listens only on this computer with the launch command above. Only `studio\static` is served as public assets. The local server is intended for owner use. A self-hosted deployment needs owner authentication before it can be exposed through a network.
 

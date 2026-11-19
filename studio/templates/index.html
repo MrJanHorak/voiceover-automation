@@ -8,7 +8,8 @@
   <link rel="stylesheet" href="/assets/studio.css">
   <script src="/assets/studio.js" defer></script>
 </head>
-<body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}">
+<body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}"
+      data-directed-available="{{ 'true' if directed_available else 'false' }}">
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
@@ -34,6 +35,17 @@
           <label for="script">Script text</label>
           <textarea id="script" rows="10" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
           <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
+          <p class="muted instructions-hint">Experimental delivery tags may have little audible effect. Vocal sounds are supported by Chatterbox.</p>
+          <div id="script-instructions"></div>
+          <div class="form-footer"><button class="button button-quiet" type="button" id="prepare-sections">Prepare sections</button></div>
+          <div id="prepared-editor" hidden>
+            <p class="muted">Edit each section before generating. Sections with sound cues use Chatterbox. Sections with special instructions use VoxCPM2.</p>
+            <div id="prepared-sections" class="section-list"></div>
+            <div class="form-footer">
+              <button class="button button-quiet" type="button" id="add-section">Add section</button>
+              <button class="button button-quiet" type="button" id="back-to-script">Back to script</button>
+            </div>
+          </div>
           <p id="script-error" class="error" role="alert" hidden></p>
           <div class="form-footer">
             <button class="button button-primary" id="generate" type="submit" disabled>Generate voice-over</button>
@@ -88,7 +100,7 @@
 
     <section class="panel wide-panel" id="review" aria-labelledby="review-heading" hidden>
       <div class="panel-heading"><h2 id="review-heading">Sections</h2><button class="button button-quiet" id="reuse-script" type="button">Use original script</button></div>
-      <p class="muted review-hint">Edit what a section says, add a delivery cue, or adjust the silence between sections.</p>
+      <p class="muted review-hint">Edit what a section says, add a vocal sound, or adjust the silence between sections.</p>
       <div id="sections" class="section-list"></div>
     </section>
 
@@ -99,20 +111,48 @@
     </section>
   </main>
   <template id="delivery-cues">
-    <select class="cue-select" aria-label="Insert delivery cue">
-      <option value="">Insert cue</option>
-      <optgroup label="Delivery">
-        <option value="[happy]">Happy</option>
+    <select class="cue-select" aria-label="Insert vocal sound">
+      <option value="">Insert sound</option>
+      <option value="[chuckle]">Chuckle</option>
+      <option value="[laugh]">Laugh</option>
+      <option value="[sigh]">Sigh</option>
+      <option value="[clear throat]">Clear throat</option>
+      <option value="[shush]">Shush</option>
+      <option value="[cough]">Cough</option>
+      <option value="[groan]">Groan</option>
+      <option value="[sniff]">Sniff</option>
+      <option value="[gasp]">Gasp</option>
+      <optgroup label="Experimental delivery tags">
+        <option value="[advertisement]">Advertisement</option>
+        <option value="[angry]">Angry</option>
+        <option value="[crying]">Crying</option>
         <option value="[dramatic]">Dramatic</option>
+        <option value="[fear]">Fear</option>
+        <option value="[happy]">Happy</option>
         <option value="[narration]">Narration</option>
-        <option value="[whispering]">Whisper</option>
-      </optgroup>
-      <optgroup label="Vocal sounds">
-        <option value="[chuckle]">Chuckle</option>
-        <option value="[laugh]">Laugh</option>
-        <option value="[sigh]">Sigh</option>
+        <option value="[sarcastic]">Sarcastic</option>
+        <option value="[surprised]">Surprised</option>
+        <option value="[whispering]">Whispering</option>
       </optgroup>
     </select>
+  </template>
+  <template id="delivery-instructions">
+    <div class="instructions-control">
+      <div class="instructions-heading">
+        <label for="">Special instructions <span class="muted">· Optional</span></label>
+        <select aria-label="Choose a delivery example">
+          <option value="">Choose an example</option>
+          <option value="Read in a hushed whisper, with deliberate pauses.">Hushed whisper</option>
+          <option value="Start restrained and build tension toward the end.">Build tension</option>
+          <option value="Read at an even pace with a warm, conversational tone.">Warm narration</option>
+        </select>
+      </div>
+      <textarea rows="2" maxlength="{{ instructions_limit }}" placeholder="Describe how to read the script…"></textarea>
+      <p class="muted instructions-hint">
+        {% if directed_available %}Write your own directions for emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 will try to follow them, and results can vary. Put spoken words in the script.
+        {% else %}Set up local VoxCPM2 to generate a recording with directions. See the README.{% endif %}
+      </p>
+    </div>
   </template>
 </body>
 </html>

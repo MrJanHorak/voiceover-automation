@@ -15,22 +15,30 @@ from filelock import FileLock
 from pydantic import BaseModel, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .audio import MAX_REFERENCE_BYTES, AudioError, TurboEngine, export_audio, prepare_reference
-from .store import CHUNK_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id
+from .audio import MAX_REFERENCE_BYTES, AudioError, DirectedEngine, TurboEngine, export_audio, prepare_reference
+from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 PACKAGE = Path(__file__).parent
 LOG = logging.getLogger(__name__)
+Directions = Annotated[str, StringConstraints(strip_whitespace=True, max_length=INSTRUCTIONS_LIMIT)]
+
+
+class SectionInput(BaseModel):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
+    instructions: Directions | None = None
 
 
 class JobInput(BaseModel):
     title: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
     script: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SCRIPT_LIMIT)]
+    instructions: Directions = ""
+    sections: Annotated[list[SectionInput], Field(min_length=1, max_length=SCRIPT_LIMIT)] | None = None
 
 
-class SectionInput(BaseModel):
-    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
+class PreviewInput(BaseModel):
+    script: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SCRIPT_LIMIT)]
 
 
 class PauseInput(BaseModel):
@@ -48,7 +56,7 @@ def install_voice(store, source, label):
         raise
 
 
-def render_job(store, engine, stop, job_id):
+def render_job(store, engine, directed, stop, job_id):
     job = store.job(job_id)
     folder = store.recordings / job_id
     folder.mkdir(exist_ok=True)
@@ -61,7 +69,11 @@ def render_job(store, engine, stop, job_id):
         if section["pending"]:
             filename = f"section-{section['number']}-{new_id()}.wav"
             try:
-                engine.render(section["text"], reference, section["seed"], folder / filename)
+                arguments = (section["text"], reference, section["seed"], folder / filename)
+                if section["instructions"]:
+                    directed.render(*arguments, section["instructions"])
+                else:
+                    engine.render(*arguments)
                 store.finish_section(job_id, section["number"], filename)
             except Exception:
                 (folder / filename).unlink(missing_ok=True)
@@ -81,14 +93,14 @@ def render_job(store, engine, stop, job_id):
         raise
 
 
-def worker(store, engine, stop):
+def worker(store, engine, directed, stop):
     while not stop.is_set():
         job_id = store.claim()
         if job_id is None:
             stop.wait(0.35)
             continue
         try:
-            render_job(store, engine, stop, job_id)
+            render_job(store, engine, directed, stop, job_id)
         except AudioError as error:
             store.fail_job(job_id, str(error))
         except Exception as error:
@@ -107,11 +119,12 @@ def local_mutation(request: Request):
         raise StudioError("Submit changes from the local studio.", 403)
 
 
-def create_app(data_dir=None, engine=None):
+def create_app(data_dir=None, engine=None, directed_engine=None):
     data_dir = Path(data_dir or os.environ.get("VOICEOVER_DATA_DIR", PROJECT / "data")).resolve()
     store = Store(data_dir / "studio")
     device = os.environ.get("VOICEOVER_DEVICE", "cpu")
     templates = Jinja2Templates(directory=PACKAGE / "templates")
+    directed = directed_engine if directed_engine is not None else DirectedEngine(PROJECT / "models" / "voxcpm2")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -129,7 +142,7 @@ def create_app(data_dir=None, engine=None):
                     app.state.reference_notice = str(error) if isinstance(error, AudioError) else "The existing reference could not be read."
             stop = Event()
             model = engine if engine is not None else TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
-            thread = Thread(target=worker, args=(store, model, stop), name="voiceover-worker", daemon=True)
+            thread = Thread(target=worker, args=(store, model, directed, stop), name="voiceover-worker", daemon=True)
             thread.start()
             try:
                 yield
@@ -165,7 +178,8 @@ def create_app(data_dir=None, engine=None):
     @app.get("/", include_in_schema=False)
     def home(request: Request):
         return templates.TemplateResponse(request=request, name="index.html", context={
-            "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS, "device": device,
+            "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
+            "device": device, "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
         })
 
     @app.get("/assets/{asset}")
@@ -208,20 +222,36 @@ def create_app(data_dir=None, engine=None):
 
     @app.post("/api/jobs", dependencies=mutations, status_code=202)
     def create_job(data: JobInput):
-        return {"id": store.create_job(data.title or "Untitled recording", data.script)}
+        prepared = None
+        if data.sections is not None:
+            prepared = [{"text": item.text, "instructions": item.instructions or ""} for item in data.sections]
+            combined = "\n\n".join(item["text"] for item in prepared)
+            if len(combined) > SCRIPT_LIMIT:
+                raise StudioError("The combined sections exceed the script length limit.")
+            for item in prepared:
+                validate_directions(item["text"], item["instructions"], directed.available)
+            script = combined
+        else:
+            validate_directions(data.script, data.instructions, directed.available)
+            script = data.script
+        return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared)}
+
+    @app.post("/api/sections/preview", dependencies=mutations)
+    def preview_sections(data: PreviewInput):
+        return {"sections": split_script(data.script)}
 
     @app.get("/api/jobs/{job_id}")
     def job_details(job_id: UUID):
         job = store.job(job_id.hex)
         return {
-            **{key: job[key] for key in ("id", "title", "script", "engine", "created_at", "status", "error", "export")},
-            "sections": [{key: section[key] for key in ("number", "text", "pending", "audio", "pause_ms")}
+            **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
+            "sections": [{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms")}
                          for section in job["sections"]],
         }
 
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput):
-        store.regenerate(job_id.hex, number, data.text)
+        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available)
         return {"id": job_id.hex}
 
     @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)

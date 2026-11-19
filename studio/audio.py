@@ -1,6 +1,8 @@
 import os
 import subprocess
 import wave
+from importlib.util import find_spec
+from math import gcd
 from pathlib import Path
 
 
@@ -77,6 +79,51 @@ class TurboEngine:
         if not audio.numel() or not torch.isfinite(audio).all() or not audio.abs().max().item():
             raise AudioError("The model returned unusable audio. Try a shorter section or a new reference.")
         sf.write(output, audio.cpu().numpy(), self.model.sr, subtype="PCM_16")
+
+
+class DirectedEngine:
+    def __init__(self, model_dir: Path):
+        self.model_dir = model_dir
+        self.model = None
+        self.watermarker = None
+
+    @property
+    def available(self):
+        return find_spec("voxcpm") is not None and all(
+            (self.model_dir / filename).is_file()
+            for filename in ("model.safetensors", "audiovae.pth", "config.json", "tokenizer.json",
+                             "tokenizer_config.json", "tokenization_voxcpm2.py", "special_tokens_map.json")
+        )
+
+    def render(self, text, reference, seed, output, instructions):
+        if not self.available:
+            raise AudioError("Start the studio with the VoxCPM2 setup described in the README.")
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        import numpy as np
+        import perth
+        import soundfile as sf
+        import torch
+        from scipy.signal import resample_poly
+        from voxcpm import VoxCPM
+
+        if self.model is None:
+            self.watermarker = perth.PerthImplicitWatermarker()
+            self.model = VoxCPM.from_pretrained(str(self.model_dir), device="cpu", optimize=False,
+                                                local_files_only=True, load_denoiser=False)
+
+        # VoxCPM2 reads the leading parenthetical as control text. Keep its delimiters unambiguous.
+        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
+        with torch.inference_mode():
+            torch.manual_seed(seed)
+            audio = self.model.generate(text=f"({direction}){text}", reference_wav_path=str(reference),
+                                        denoise=False)
+            if not audio.size or not np.isfinite(audio).all() or not audio.any():
+                raise AudioError("The directed model returned unusable audio. Try a shorter section.")
+            source_rate = self.model.tts_model.sample_rate
+            divisor = gcd(source_rate, RATE)
+            audio = resample_poly(audio, RATE // divisor, source_rate // divisor).astype(np.float32)
+            audio = self.watermarker.apply_watermark(audio, sample_rate=RATE)
+        sf.write(output, audio, RATE, subtype="PCM_16")
 
 
 def export_audio(chunks, wav_path, mp3_path):

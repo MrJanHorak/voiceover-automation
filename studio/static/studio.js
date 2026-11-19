@@ -3,6 +3,7 @@ const script = byId("script");
 const scriptLimit = Number(document.body.dataset.scriptLimit);
 const chunkLimit = Number(document.body.dataset.chunkLimit);
 const maxPause = Number(document.body.dataset.maxPause);
+const directedAvailable = document.body.dataset.directedAvailable === "true";
 const statusNames = { queued: "Queued", running: "Generating", ready: "Ready", failed: "Failed" };
 
 let selected = null;
@@ -17,8 +18,10 @@ let polling = false;
 let submitting = false;
 let referenceBusy = false;
 let voiceRevision = 0;
+let prepared = null;
 const sectionDrafts = new Map();
 const pauseDrafts = new Map();
+const instructionDrafts = new Map();
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -57,7 +60,11 @@ function change(url, { method = "POST", value } = {}) {
 
 function updateEditor() {
   byId("script-count").textContent = `${script.value.length.toLocaleString()} / ${scriptLimit.toLocaleString()}`;
-  byId("generate").disabled = submitting || referenceBusy || !state.voice || !script.value.trim();
+  const directed = Boolean(scriptDirections.field.value.trim());
+  scriptSounds.disabled = directed;
+  const ready = prepared ? prepared.every((part) => part.text.trim() && (!part.instructions.trim() || directedAvailable))
+    : Boolean(script.value.trim()) && (!directed || directedAvailable);
+  byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready;
 }
 
 function cuePicker(field, errorId) {
@@ -73,7 +80,7 @@ function cuePicker(field, errorId) {
     const suffix = !next || !/[\s.,!?;:]/.test(next) ? " " : "";
     const insertion = `${prefix}${cue}${suffix}`;
     if (field.value.length + insertion.length > field.maxLength) {
-      errorAt(errorId, "Shorten the text to make room for the delivery cue.");
+      errorAt(errorId, "Shorten the text to make room for the sound cue.");
       return;
     }
     errorAt(errorId);
@@ -82,6 +89,73 @@ function cuePicker(field, errorId) {
     field.focus();
   });
   return picker;
+}
+
+function instructionsEditor(id, value, readOnly = false) {
+  const box = byId("delivery-instructions").content.firstElementChild.cloneNode(true);
+  const field = box.querySelector("textarea");
+  const picker = box.querySelector("select");
+  field.id = id;
+  field.value = value;
+  field.readOnly = readOnly;
+  picker.disabled = readOnly;
+  box.querySelector("label").htmlFor = id;
+  picker.addEventListener("change", () => {
+    if (!picker.value) return;
+    field.value = picker.value;
+    picker.value = "";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.focus();
+  });
+  return { box, field };
+}
+
+function renderPrepared() {
+  const container = byId("prepared-sections");
+  container.replaceChildren();
+  prepared.forEach((part, index) => {
+    const box = element("div", "section");
+    const title = element("strong", "", `Section ${index + 1}`);
+    const label = element("label", "", "Words to speak");
+    const field = element("textarea");
+    field.id = `prepared-text-${index}`;
+    field.rows = 3;
+    field.maxLength = chunkLimit;
+    field.value = part.text;
+    label.htmlFor = field.id;
+    const sounds = cuePicker(field, "script-error");
+    const directions = instructionsEditor(`prepared-instructions-${index}`, part.instructions);
+    const refreshControls = () => {
+      sounds.disabled = Boolean(directions.field.value.trim());
+      updateEditor();
+    };
+    field.addEventListener("input", () => { part.text = field.value; refreshControls(); });
+    directions.field.addEventListener("input", () => { part.instructions = directions.field.value; refreshControls(); });
+    const remove = element("button", "button button-quiet", "Remove section");
+    remove.type = "button";
+    remove.disabled = prepared.length === 1;
+    remove.addEventListener("click", () => {
+      if (!window.confirm("Remove this section from the draft?")) return;
+      prepared.splice(index, 1);
+      renderPrepared();
+      updateEditor();
+    });
+    box.append(title, label, field, sounds, directions.box, remove);
+    container.append(box);
+    refreshControls();
+  });
+}
+
+function setPrepared(value) {
+  prepared = value;
+  byId("prepared-editor").hidden = !value;
+  script.readOnly = Boolean(value);
+  byId("import-script").disabled = Boolean(value);
+  byId("prepare-sections").hidden = Boolean(value);
+  byId("script-cue").hidden = Boolean(value);
+  byId("script-instructions").hidden = Boolean(value);
+  if (value) renderPrepared();
+  updateEditor();
 }
 
 function renderVoice() {
@@ -272,26 +346,41 @@ function renderSections(entry) {
     field.readOnly = entry.status !== "ready";
     const redo = element("button", "button button-quiet", "Regenerate section");
     redo.type = "button";
-    redo.disabled = field.readOnly || !field.value.trim();
+    const sounds = cuePicker(field, "result-error");
+    const directions = instructionsEditor(`section-instructions-${section.number}`,
+      instructionDrafts.get(key) ?? section.instructions ?? "", field.readOnly);
+    const updateActions = () => {
+      const directed = Boolean(directions.field.value.trim());
+      sounds.disabled = field.readOnly || directed;
+      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable);
+    };
     field.addEventListener("input", () => {
       sectionDrafts.set(key, field.value);
-      redo.disabled = !field.value.trim();
+      updateActions();
+    });
+    directions.field.addEventListener("input", () => {
+      instructionDrafts.set(key, directions.field.value);
+      updateActions();
     });
     redo.addEventListener("click", async () => {
       redo.disabled = true;
       errorAt("result-error");
       try {
-        await change(`/api/jobs/${entry.id}/sections/${section.number}`, { value: { text: field.value } });
+        await change(`/api/jobs/${entry.id}/sections/${section.number}`, {
+          value: { text: field.value, instructions: directions.field.value },
+        });
         sectionDrafts.delete(key);
+        instructionDrafts.delete(key);
         await refreshJob();
       } catch (error) {
         errorAt("result-error", error.message);
-        redo.disabled = false;
+        updateActions();
       }
     });
     const actions = element("div", "section-actions");
-    actions.append(cuePicker(field, "result-error"), redo);
-    box.append(label, field, actions);
+    actions.append(sounds, redo);
+    updateActions();
+    box.append(label, field, directions.box, actions);
     if (index + 1 < entry.sections.length) box.append(pauseEditor(entry, section, key));
     return box;
   });
@@ -383,7 +472,33 @@ async function refresh() {
   }
 }
 
+const scriptSounds = cuePicker(script, "script-error");
+const scriptDirections = instructionsEditor("recording-instructions", "");
+byId("script-cue").append(scriptSounds);
+byId("script-instructions").append(scriptDirections.box);
+
 script.addEventListener("input", updateEditor);
+scriptDirections.field.addEventListener("input", updateEditor);
+byId("prepare-sections").addEventListener("click", async () => {
+  errorAt("script-error");
+  try {
+    const result = await change("/api/sections/preview", { value: { script: script.value } });
+    setPrepared(result.sections.map((text) => ({ text, instructions: scriptDirections.field.value })));
+  } catch (error) {
+    errorAt("script-error", error.message);
+  }
+});
+byId("add-section").addEventListener("click", () => {
+  prepared.push({ text: "", instructions: "" });
+  renderPrepared();
+  byId(`prepared-text-${prepared.length - 1}`).focus();
+});
+byId("back-to-script").addEventListener("click", () => {
+  if (prepared.some((part) => part.instructions.trim()) && !window.confirm("Return to the script editor? Per-section instructions will be cleared.")) return;
+  script.value = prepared.map((part) => part.text).join("\n\n");
+  scriptDirections.field.value = "";
+  setPrepared(null);
+});
 byId("script-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (submitting) return;
@@ -391,7 +506,11 @@ byId("script-form").addEventListener("submit", async (event) => {
   updateEditor();
   errorAt("script-error");
   try {
-    const created = await change("/api/jobs", { value: { title: byId("recording-title").value, script: script.value } });
+    const created = await change("/api/jobs", {
+      value: prepared
+        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared }
+        : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value },
+    });
     await selectJob(created.id);
     await refresh();
   } catch (error) {
@@ -466,14 +585,16 @@ byId("retry").addEventListener("click", async (event) => {
 
 byId("reuse-script").addEventListener("click", () => {
   if (!job) return;
+  if (prepared && !window.confirm("Replace the section draft with this recording's script?")) return;
+  setPrepared(null);
   byId("recording-title").value = job.title;
   byId("imported-file").textContent = "";
   script.value = job.script;
+  scriptDirections.field.value = job.instructions ?? "";
   updateEditor();
   script.focus();
 });
 
-byId("script-cue").append(cuePicker(script, "script-error"));
 updateEditor();
 refresh();
 window.setInterval(refresh, 1600);

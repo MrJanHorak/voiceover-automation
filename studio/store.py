@@ -11,7 +11,13 @@ SCRIPT_LIMIT = 12000
 CHUNK_LIMIT = 220
 DEFAULT_PAUSE_MS = 160
 MAX_PAUSE_MS = 5000
+INSTRUCTIONS_LIMIT = 240
 ENGINE_VERSION = "Chatterbox Turbo 0.1.7 · 749d1c1"
+DIRECTED_VERSION = "VoxCPM2 2.0.3 · 7936080"
+TURBO_SOUND_CUE = re.compile(
+    r"\[(?:advertisement|angry|chuckle|clear throat|cough|crying|dramatic|fear|gasp|groan|"
+    r"happy|laugh|narration|sarcastic|shush|sigh|sniff|surprised|whispering)\]", re.IGNORECASE,
+)
 
 
 class StudioError(Exception):
@@ -26,6 +32,15 @@ def new_id():
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def validate_directions(text, instructions, available):
+    if instructions and not available:
+        raise StudioError("Special instructions need the local VoxCPM2 setup described in the README.", 409)
+    if instructions and not instructions.replace("(", "").replace(")", "").strip():
+        raise StudioError("Enter a description of the delivery you want.")
+    if instructions and TURBO_SOUND_CUE.search(text):
+        raise StudioError("Remove bracketed sound or delivery cues from the script when using Special instructions.")
 
 
 def split_script(script):
@@ -98,11 +113,16 @@ class Store:
                     PRIMARY KEY (job_id, number)
                 );
             """)
-            if "pause_ms" not in {column["name"] for column in db.execute("PRAGMA table_info(sections)")}:
+            section_columns = {column["name"] for column in db.execute("PRAGMA table_info(sections)")}
+            if "pause_ms" not in section_columns:
                 db.execute(f"""
                     ALTER TABLE sections ADD COLUMN pause_ms INTEGER NOT NULL DEFAULT {DEFAULT_PAUSE_MS}
                     CHECK (pause_ms BETWEEN 0 AND {MAX_PAUSE_MS})
                 """)
+            if "instructions" not in section_columns:
+                db.execute("ALTER TABLE sections ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+            if "instructions" not in {column["name"] for column in db.execute("PRAGMA table_info(jobs)")}:
+                db.execute("ALTER TABLE jobs ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
             db.execute("""
                 UPDATE jobs SET status = 'failed', error = 'Generation was interrupted. Retry to continue.'
                 WHERE status = 'running'
@@ -152,8 +172,10 @@ class Store:
             return {"voice": self.active_voice(db), "voices": [dict(voice) for voice in voices],
                     "jobs": [dict(job) for job in jobs]}
 
-    def create_job(self, title, script):
-        sections = split_script(script)
+    def create_job(self, title, script, instructions="", prepared_sections=None):
+        sections = prepared_sections if prepared_sections is not None else [
+            {"text": text, "instructions": instructions} for text in split_script(script)
+        ]
         if not sections:
             raise StudioError("Enter a script with text to speak.")
         job_id = new_id()
@@ -163,10 +185,12 @@ class Store:
             if voice is None:
                 raise StudioError("Add a voice reference before generating a recording.", 409)
             db.execute("""
-                INSERT INTO jobs (id, title, script, voice_id, engine, created_at) VALUES (?, ?, ?, ?, ?, ?)
-            """, (job_id, title, script, voice["id"], ENGINE_VERSION, now()))
-            db.executemany("INSERT INTO sections (job_id, number, text) VALUES (?, ?, ?)",
-                           [(job_id, index, section) for index, section in enumerate(sections, 1)])
+                INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (job_id, title, script, voice["id"], DIRECTED_VERSION if any(section["instructions"] for section in sections) else ENGINE_VERSION,
+                  now(), instructions))
+            db.executemany("INSERT INTO sections (job_id, number, text, instructions) VALUES (?, ?, ?, ?)",
+                           [(job_id, index, section["text"], section["instructions"]) for index, section in enumerate(sections, 1)])
         return job_id
 
     def job(self, job_id):
@@ -215,16 +239,20 @@ class Store:
                 raise StudioError("Only a failed recording can be retried.", 409)
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
-    def regenerate(self, job_id, number, text):
+    def regenerate(self, job_id, number, text, instructions=None, directed_available=False):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if self.get_job(db, job_id)["status"] != "ready":
                 raise StudioError("Wait for the recording to finish before regenerating.", 409)
-            updated = db.execute("""
-                UPDATE sections SET text = ?, seed = ?, pending = 1 WHERE job_id = ? AND number = ?
-            """, (text, secrets.randbits(31), job_id, number))
-            if updated.rowcount != 1:
+            section = db.execute("SELECT instructions FROM sections WHERE job_id = ? AND number = ?",
+                                 (job_id, number)).fetchone()
+            if section is None:
                 raise StudioError("Section not found.", 404)
+            instructions = section["instructions"] if instructions is None else instructions
+            validate_directions(text, instructions, directed_available)
+            db.execute("""
+                UPDATE sections SET text = ?, instructions = ?, seed = ?, pending = 1 WHERE job_id = ? AND number = ?
+            """, (text, instructions, secrets.randbits(31), job_id, number))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def adjust_pause(self, job_id, number, pause_ms):

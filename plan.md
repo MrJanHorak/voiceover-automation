@@ -52,8 +52,9 @@ The local studio implements enrollment, pasted text and UTF-8 `.txt` import, sec
 ### Delivery controls
 
 1. **Extra pause after section** adjusts the inserted silence from 0 to 5,000 ms and rebuilds the WAV and MP3 from the existing section recordings. The default remains 160 ms between sections.
-2. **Insert cue** adds Chatterbox Turbo cues such as `[chuckle]`, `[sigh]`, and `[whispering]` in the script or a section. Treat cues as performance prompts and review the result by ear.
-3. **Saved references** lets the owner name new samples and switch between previously saved ones. Compare conversational, warm, and dramatic recordings using the same script, then choose the references that carry over the intended delivery while retaining the owner's voice. Evaluate Original Chatterbox locally if customers need stronger expression control. [Chatterbox model guidance](https://github.com/resemble-ai/chatterbox#original-chatterbox-tips)
+2. **Insert sound** offers `[chuckle]`, `[laugh]`, and `[sigh]` in the script or a section. Resemble documents these vocal sounds for Turbo. The owner found that whispering, dramatic, and narration tags gave weak or unclear results, and the installed Turbo engine ignores `exaggeration`. [Supported sounds](https://huggingface.co/ResembleAI/chatterbox-turbo/discussions/21), [Turbo implementation](https://github.com/resemble-ai/chatterbox/blob/master/src/chatterbox/tts_turbo.py)
+3. **Saved references** lets the owner name new samples and switch between previously saved ones. Compare conversational, warm, dramatic, and whispered recordings using the same script, then choose the references that carry over the intended delivery while retaining the owner's voice.
+4. **Special instructions** uses local VoxCPM2 for directed reads. Keep the reference and script fixed while comparing neutral, whispered, subtly dramatic, and strongly dramatic directions. Evaluate resemblance, style adherence, and turnaround before applying a style to customer work. Sections with blank instructions use Chatterbox Turbo. [VoxCPM2 controllable cloning](https://huggingface.co/openbmb/VoxCPM2#controllable-voice-cloning)
 
 ### Self-host privately after local validation
 
