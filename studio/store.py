@@ -246,6 +246,8 @@ class Store:
                 db.execute("ALTER TABLE section_takes ADD COLUMN voice_match TEXT")
             if "spoken" not in take_columns:
                 db.execute("ALTER TABLE section_takes ADD COLUMN spoken TEXT")
+            if "check_result" not in take_columns:
+                db.execute("ALTER TABLE section_takes ADD COLUMN check_result TEXT")
             if "transcript" not in {column["name"] for column in db.execute("PRAGMA table_info(voices)")}:
                 db.execute("ALTER TABLE voices ADD COLUMN transcript TEXT NOT NULL DEFAULT ''")
             for name, kind in (("rendered_engine", "TEXT"), ("rendered_device", "TEXT"),
@@ -266,6 +268,10 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN loudness_target REAL")
             if "export_loudness" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN export_loudness TEXT")
+            if "auto_retries" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN auto_retries INTEGER NOT NULL DEFAULT 0")
+            if "check_requested" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN check_requested INTEGER NOT NULL DEFAULT 0")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -359,7 +365,9 @@ class Store:
                 raise StudioError("Pronunciation not found.", 404)
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
-                   voice_match="standard", directed_available=False):
+                   voice_match="standard", directed_available=False, auto_retries=0):
+        if auto_retries not in (0, 1, 2):
+            raise StudioError("Choose 0, 1 or 2 automatic retries.")
         sections = prepared_sections if prepared_sections is not None else [
             {"text": text, "instructions": instructions, "pause_ms": pause}
             for text, pause in split_script_with_pauses(script)
@@ -379,10 +387,10 @@ class Store:
             uses_voxcpm = any(section["instructions"] or section["voice_match"] == "maximum" for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
-                                  master_rate, loudness_target)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                                  master_rate, loudness_target, auto_retries)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
-                  now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS))
+                  now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
                 if section["instructions"] or section["voice_match"] == "maximum":
@@ -489,8 +497,37 @@ class Store:
 
     def finish_job(self, job_id, export, loudness=None):
         with self.connect() as db:
-            db.execute("UPDATE jobs SET status = 'ready', export = ?, error = NULL, export_loudness = ? WHERE id = ?",
-                       (export, json.dumps(loudness) if loudness else None, job_id))
+            db.execute("""
+                UPDATE jobs SET status = 'ready', export = ?, error = NULL, export_loudness = ?, check_requested = 0
+                WHERE id = ?
+            """, (export, json.dumps(loudness) if loudness else None, job_id))
+
+    def record_check(self, job_id, number, audio, result):
+        with self.connect() as db:
+            db.execute("UPDATE section_takes SET check_result = ? WHERE job_id = ? AND section_number = ? AND audio = ?",
+                       (json.dumps(result), job_id, number, audio))
+
+    def select_take(self, job_id, number, audio):
+        """Make an already generated take current, for example the best of several attempts."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            take = db.execute("SELECT * FROM section_takes WHERE job_id = ? AND section_number = ? AND audio = ?",
+                              (job_id, number, audio)).fetchone()
+            if take is None:
+                raise StudioError("Take not found.", 404)
+            db.execute("""
+                UPDATE sections SET audio = ?, pending = 0, rendered_engine = ?, rendered_device = ?, rendered_runtime = ?,
+                    rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?
+                WHERE job_id = ? AND number = ?
+            """, (take["audio"], take["engine"], take["device"], take["runtime"], take["model_sha256"], take["seed"],
+                  take["created_at"], job_id, number))
+
+    def request_check(self, job_id):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if self.get_job(db, job_id)["status"] != "ready":
+                raise StudioError("Wait for the recording to finish before checking it.", 409)
+            db.execute("UPDATE jobs SET check_requested = 1, status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def set_loudness(self, job_id, target):
         if target is not None and target not in LOUDNESS_TARGETS:

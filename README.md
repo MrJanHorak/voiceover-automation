@@ -92,6 +92,22 @@ To plan different deliveries before generating, add blank lines where you want s
 
 Special instructions accept your own plain-language description of emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 tries to follow the instructions, and the result can vary, so listen to each take.
 
+### Automatic checks
+
+The studio can check each new section by itself. It transcribes the take with a local Whisper model and compares it with the words the voice was asked to say, after both are written out in full. It also flags a mumbled opening, scores the take's resemblance to your voice reference with Chatterbox's speaker encoder, and checks the speaking pace. Checks run on the CPU so they do not compete with the voice models for the GPU, and nothing leaves the computer.
+
+Set up the speech-recognition model once from the project directory (about 1 GB; Whisper is MIT-licensed):
+
+```powershell
+.\.tools\directed-env\Scripts\python.exe -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-small.en', local_dir='models/whisper-small.en', allow_patterns=['*.json', '*.txt', 'model.safetensors'])"
+```
+
+Restart the studio afterwards. Both studio environments include the required libraries. To use a different Whisper model, download it to another folder and set `VOICEOVER_ASR_DIR` to that folder before starting.
+
+Under **If a section fails its automatic check**, choose to generate once more and keep the better take (default), up to twice more, or keep the take and mark it for review. Every take stays under **All takes** with its check result, so you can still choose a different one. Each section shows **Check passed** or **Needs review** with the reason and what the transcription heard, and the Recording panel counts sections that need review. Select **Check recording** to check the current takes of a finished or older recording without generating new speech.
+
+A check is a guide, not a guarantee. Transcription can miss a subtle mispronunciation or mishear a correct word, and the voice-match threshold (0.6) is provisional until it is calibrated with your recordings. Listen before delivery.
+
 ### Spoken words and pronunciations
 
 Before a section is generated, the studio writes out dates, times, prices, percentages, phone numbers, years, ordinals, number ranges, web addresses and common abbreviations as words. For example, `Jan. 5 at 9 a.m.` is read as "January fifth at nine A M" and `$1,299.99` as "one thousand two hundred ninety-nine dollars and ninety-nine cents". Your script and sections keep the text as written, and bracketed sound cues are left alone.

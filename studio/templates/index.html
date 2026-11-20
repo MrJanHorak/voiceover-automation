@@ -9,7 +9,8 @@
   <script src="/assets/studio.js" defer></script>
 </head>
 <body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}"
-      data-directed-available="{{ 'true' if directed_available else 'false' }}">
+      data-directed-available="{{ 'true' if directed_available else 'false' }}"
+      data-checks-available="{{ 'true' if checks_available else 'false' }}">
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
@@ -40,6 +41,18 @@
           <div id="script-engine"></div>
           <div id="script-instructions"></div>
           <div id="script-advanced"></div>
+          <div class="instructions-control">
+            <label for="auto-retries">If a section fails its automatic check</label>
+            <select id="auto-retries" {% if not checks_available %}disabled{% endif %}>
+              <option value="1">Generate once more and keep the better take</option>
+              <option value="2">Generate up to twice more and keep the best take</option>
+              <option value="0">Keep it and mark it for review</option>
+            </select>
+            <p class="muted instructions-hint">
+              {% if checks_available %}Each new section is transcribed on this computer and compared with the script, its voice is compared with your reference, and its pace is checked. Checks add a few seconds per section; each retry adds another generation. Every take stays under All takes.
+              {% else %}Automatic checks are not set up. Download the speech-recognition model described in the README, then restart the studio.{% endif %}
+            </p>
+          </div>
           <details id="pronunciations" class="advanced-settings">
             <summary>Pronunciations and spoken words</summary>
             <p class="muted advanced-intro">Dates, times, prices, percentages, phone numbers, years and common abbreviations are written out as words before the voice reads them; your script stays as written. Add words the voice gets wrong, such as names, brands or acronyms. Changes apply to sections generated afterwards.</p>
@@ -149,6 +162,7 @@
           </div>
           <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
           <button class="button button-quiet" id="balance" type="button" hidden>Balance volume</button>
+          <button class="button button-quiet" id="check-recording" type="button" hidden>Check recording</button>
         </section>
       </aside>
     </div>

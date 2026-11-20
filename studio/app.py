@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import secrets
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .normalize import spoken_text
+from .quality import QualityChecker, score as quality_score
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 
@@ -61,6 +63,7 @@ class JobInput(BaseModel):
     sections: Annotated[list[SectionInput], Field(min_length=1, max_length=SCRIPT_LIMIT)] | None = None
     turbo_settings: TurboSettings | None = None
     voice_match: VoiceMatch = "standard"
+    auto_retries: Literal[0, 1, 2] = 1
 
 
 class PreviewInput(BaseModel):
@@ -82,6 +85,10 @@ class ReferenceMix(BaseModel):
     excerpts: Annotated[list[ReferenceExcerpt], Field(min_length=1, max_length=20)]
 
 
+class NoChecks:
+    available = False
+
+
 def install_voice(store, source, label):
     voice_id = new_id()
     destination = store.voices / f"{voice_id}.wav"
@@ -97,56 +104,101 @@ def install_voice(store, source, label):
         raise
 
 
-def render_job(store, engine, directed, stop, job_id):
+def render_attempt(store, engine, directed, job, section, folder, reference, spoken, seed):
+    """Generate one take of a section, record it and return its filename."""
+    job_id = job["id"]
+    filename = f"section-{section['number']}-{new_id()}.wav"
+    try:
+        arguments = (spoken, reference, seed, folder / filename)
+        matched = not section["instructions"] and section.get("voice_match") == "maximum"
+        if section["instructions"] or matched:
+            if getattr(directed, "needs_exclusive_gpu", False):
+                release = getattr(engine, "release", None)
+                if release:
+                    release()
+            if matched:
+                directed.render_matched(*arguments, job.get("voice_transcript") or "")
+            else:
+                directed.render(*arguments, section["instructions"])
+            rendered_by = directed
+        else:
+            settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
+            if settings is None:
+                engine.render(*arguments)
+            else:
+                engine.render(*arguments, settings=settings)
+            rendered_by = engine
+        details = None
+        if callable(getattr(rendered_by, "details", None)):
+            try:
+                details = rendered_by.details()
+            except Exception as error:
+                LOG.warning("Could not record model details (%s)", type(error).__name__)
+        if details and matched and details.get("engine"):
+            details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
+        store.finish_section(job_id, section["number"], filename, details, seed, spoken)
+    except Exception:
+        (folder / filename).unlink(missing_ok=True)
+        raise
+    return filename
+
+
+def check_take(store, checker, job_id, number, path, spoken, reference):
+    """Run the automatic check for one take; a checker failure never stops the recording."""
+    try:
+        result = checker.check(path, spoken, reference)
+    except Exception as error:
+        LOG.warning("Automatic check could not run (%s)", type(error).__name__)
+        result = {"status": "error", "reasons": ["The automatic check could not run."]}
+    store.record_check(job_id, number, path.name, result)
+    return result
+
+
+def render_job(store, engine, directed, stop, job_id, checker=None):
     job = store.job(job_id)
+    job.setdefault("id", job_id)
     folder = store.recordings / job_id
     folder.mkdir(exist_ok=True)
     reference = store.voices / f"{job['voice_id']}.wav"
     pairs = store.pronunciation_pairs() if hasattr(store, "pronunciation_pairs") else []
+    checking = checker is not None and checker.available
+    retries = (job.get("auto_retries") or 0) if checking else 0
     filenames = {section["number"]: section["audio"] for section in job["sections"]}
+
+    if checking and job.get("check_requested"):
+        # The owner asked to check a finished recording: check each section's current take.
+        for section in job["sections"]:
+            if stop.is_set():
+                return
+            if section["audio"] and not section["pending"]:
+                current = next((take for take in section.get("takes", []) if take["audio"] == section["audio"]), {})
+                spoken = current.get("spoken") or spoken_text(section["text"], pairs)
+                check_take(store, checker, job_id, section["number"], folder / section["audio"], spoken, reference)
+
     pending = [section for section in job["sections"] if section["pending"]]
     if getattr(directed, "needs_exclusive_gpu", False):
         # Render Chatterbox sections first so the shared 4 GB GPU switches engines only once.
         pending.sort(key=lambda section: bool(section["instructions"]) or section.get("voice_match") == "maximum")
     for section in pending:
-        if stop.is_set():
-            return
-        filename = f"section-{section['number']}-{new_id()}.wav"
-        try:
-            # Models receive normalized words; the section keeps the text as written.
-            spoken = spoken_text(section["text"], pairs)
-            arguments = (spoken, reference, section["seed"], folder / filename)
-            matched = not section["instructions"] and section.get("voice_match") == "maximum"
-            if section["instructions"] or matched:
-                if getattr(directed, "needs_exclusive_gpu", False):
-                    release = getattr(engine, "release", None)
-                    if release:
-                        release()
-                if matched:
-                    directed.render_matched(*arguments, job.get("voice_transcript") or "")
-                else:
-                    directed.render(*arguments, section["instructions"])
-                rendered_by = directed
-            else:
-                settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
-                if settings is None:
-                    engine.render(*arguments)
-                else:
-                    engine.render(*arguments, settings=settings)
-                rendered_by = engine
-            details = None
-            if callable(getattr(rendered_by, "details", None)):
-                try:
-                    details = rendered_by.details()
-                except Exception as error:
-                    LOG.warning("Could not record model details (%s)", type(error).__name__)
-            if details and matched and details.get("engine"):
-                details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
-            store.finish_section(job_id, section["number"], filename, details, section["seed"], spoken)
-        except Exception:
-            (folder / filename).unlink(missing_ok=True)
-            raise
-        filenames[section["number"]] = filename
+        # Models receive normalized words; the section keeps the text as written.
+        spoken = spoken_text(section["text"], pairs)
+        attempts = []
+        for attempt in range(1 + retries):
+            if stop.is_set():
+                return
+            seed = section["seed"] if attempt == 0 else secrets.randbelow(2147483647) + 1
+            filename = render_attempt(store, engine, directed, job, section, folder, reference, spoken, seed)
+            result = check_take(store, checker, job_id, section["number"], folder / filename, spoken, reference) if checking else None
+            attempts.append((filename, result))
+            if result is None or result.get("status") == "pass":
+                break
+        best = attempts[-1][0]
+        scored = [(filename, result) for filename, result in attempts if result and result.get("status") != "error"]
+        if len(attempts) > 1 and scored:
+            best = min(scored, key=lambda item: quality_score(item[1]))[0]
+            if best != attempts[-1][0]:
+                store.select_take(job_id, section["number"], best)
+        filenames[section["number"]] = best
     paths = [(folder / filenames[section["number"]], section["pause_ms"]) for section in job["sections"]]
 
     if stop.is_set():
@@ -163,14 +215,14 @@ def render_job(store, engine, directed, stop, job_id):
         raise
 
 
-def worker(store, engine, directed, stop):
+def worker(store, engine, directed, stop, checker=None):
     while not stop.is_set():
         job_id = store.claim()
         if job_id is None:
             stop.wait(0.35)
             continue
         try:
-            render_job(store, engine, directed, stop, job_id)
+            render_job(store, engine, directed, stop, job_id, checker)
         except AudioError as error:
             store.fail_job(job_id, str(error))
         except Exception as error:
@@ -189,7 +241,7 @@ def local_mutation(request: Request):
         raise StudioError("Submit changes from the local studio.", 403)
 
 
-def create_app(data_dir=None, engine=None, directed_engine=None):
+def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker=None):
     data_dir = Path(data_dir or os.environ.get("VOICEOVER_DATA_DIR", PROJECT / "data")).resolve()
     store = Store(data_dir / "studio")
     device = os.environ.get("VOICEOVER_DEVICE", "cpu")
@@ -206,6 +258,13 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         directed = CudaDirectedEngine(runtime, weights)
     else:
         directed = DirectedEngine(PROJECT / "models" / "voxcpm2")
+    if quality_checker is not None:
+        checker = quality_checker
+    elif engine is not None:
+        checker = NoChecks()  # Tests that supply their own engine also choose their own checker.
+    else:
+        checker = QualityChecker(Path(os.environ.get("VOICEOVER_ASR_DIR", PROJECT / "models" / "whisper-small.en")),
+                                 PROJECT / "models" / "chatterbox-turbo" / "ve.safetensors")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -223,7 +282,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
                     app.state.reference_notice = str(error) if isinstance(error, AudioError) else "The existing reference could not be read."
             stop = Event()
             model = engine if engine is not None else TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
-            thread = Thread(target=worker, args=(store, model, directed, stop), name="voiceover-worker", daemon=True)
+            thread = Thread(target=worker, args=(store, model, directed, stop, checker), name="voiceover-worker", daemon=True)
             thread.start()
             try:
                 yield
@@ -262,7 +321,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
             "device": device, "directed_device": directed_device,
             "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
-            "transcript_limit": TRANSCRIPT_LIMIT,
+            "transcript_limit": TRANSCRIPT_LIMIT, "checks_available": checker.available,
         })
 
     @app.get("/assets/{asset}")
@@ -372,7 +431,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             script = data.script
         settings = data.turbo_settings.model_dump() if data.turbo_settings else None
         return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings,
-                                       data.voice_match, directed.available)}
+                                       data.voice_match, directed.available, data.auto_retries)}
 
     @app.post("/api/sections/preview", dependencies=mutations)
     def preview_sections(data: PreviewInput):
@@ -389,12 +448,16 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             "voice_transcript_ready": bool(job["voice_transcript"]),
             "master_rate": job["master_rate"], "loudness_target": job["loudness_target"],
             "export_loudness": json.loads(job["export_loudness"]) if job["export_loudness"] else None,
+            "auto_retries": job["auto_retries"], "checks_available": checker.available,
             "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms", "voice_match")},
                           "spoken": spoken_text(section["text"], pairs),
                           "generation": {key: section[f"rendered_{key}"] for key in
                                          ("engine", "device", "runtime", "model_sha256", "seed", "at")},
                           "turbo_settings": json.loads(section["turbo_settings"]) if section["turbo_settings"] else None,
+                          "check": next((json.loads(take["check_result"]) for take in section["takes"]
+                                         if take["audio"] == section["audio"] and take["check_result"]), None),
                           "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at", "voice_match", "spoken")},
+                                     "check": json.loads(take["check_result"]) if take["check_result"] else None,
                                      "seed": take["seed"],
                                      "turbo_settings": json.loads(take["turbo_settings"]) if take["turbo_settings"] else None,
                                      "current": take["audio"] == section["audio"],
@@ -422,6 +485,13 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     @app.put("/api/jobs/{job_id}/loudness", dependencies=mutations, status_code=202)
     def update_loudness(job_id: UUID, data: LoudnessInput):
         store.set_loudness(job_id.hex, None if data.target is None else float(data.target))
+        return {"id": job_id.hex}
+
+    @app.post("/api/jobs/{job_id}/check", dependencies=mutations, status_code=202)
+    def check_recording(job_id: UUID):
+        if not checker.available:
+            raise StudioError("Set up automatic checks using the README first.", 409)
+        store.request_check(job_id.hex)
         return {"id": job_id.hex}
 
     @app.post("/api/jobs/{job_id}/balance", dependencies=mutations, status_code=202)

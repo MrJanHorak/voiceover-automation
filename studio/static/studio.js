@@ -659,6 +659,15 @@ function pauseEditor(entry, section, key) {
   return form;
 }
 
+function checkSummary(check) {
+  if (!check) return null;
+  if (check.status === "error") return { className: "check-review", text: "Automatic check could not run." };
+  const parts = [`${Math.round((check.word_error ?? 0) * 100)}% word differences`];
+  if (check.similarity !== null && check.similarity !== undefined) parts.push(`voice match ${check.similarity.toFixed(2)}`);
+  if (check.status === "pass") return { className: "check-pass", text: `Check passed · ${parts.join(" · ")}` };
+  return { className: "check-review", text: `Needs review: ${(check.reasons || []).join("; ")} · Heard: \u201c${check.heard || ""}\u201d` };
+}
+
 function renderSections(entry) {
   const container = byId("sections");
   const expanded = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.key));
@@ -691,6 +700,8 @@ function renderSections(entry) {
         metadata.title = `Primary model SHA-256: ${details.model_sha256}`;
       }
       box.append(metadata);
+      const summary = checkSummary(section.check);
+      if (summary) box.append(element("p", `check-result ${summary.className}`, summary.text));
     }
     // Pending sections preview the words the next take will use; finished ones show what their take used.
     const shownSpoken = section.pending ? section.spoken : section.takes?.find((take) => take.current)?.spoken;
@@ -771,6 +782,8 @@ function renderSections(entry) {
         if (info) item.append(element("p", "muted", info));
         item.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
         if (take.spoken && take.spoken !== take.text) item.append(element("p", "muted", `Spoken as: ${take.spoken}`));
+        const takeCheck = checkSummary(take.check);
+        if (takeCheck) item.append(element("p", `check-result ${takeCheck.className}`, takeCheck.text));
         if (take.instructions) item.append(element("p", "muted", `Instructions: ${take.instructions}`));
         if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
           const setting = take.turbo_settings;
@@ -822,6 +835,8 @@ function renderJob(entry) {
   byId("retry").disabled = false;
   byId("balance").hidden = entry?.status !== "ready" || !entry?.export;
   byId("balance").disabled = false;
+  byId("check-recording").hidden = !(entry?.checks_available && entry?.status === "ready");
+  byId("check-recording").disabled = false;
   errorAt("result-error", entry?.error);
   if (!entry) {
     message.textContent = "Generate a voice-over to play and download it here.";
@@ -836,7 +851,9 @@ function renderJob(entry) {
       ready: `${total} ${total === 1 ? "section" : "sections"} · ready to review`,
       failed: entry.export ? "Previous export available" : "Generation paused",
     };
-    message.textContent = `${entry.title} · ${phrases[entry.status]}`;
+    const review = entry.sections.filter((section) => !section.pending && section.check && section.check.status !== "pass").length;
+    const reviewNote = review ? ` · ${review} ${review === 1 ? "section needs" : "sections need"} review` : "";
+    message.textContent = `${entry.title} · ${phrases[entry.status]}${reviewNote}`;
   }
   updateExport(entry);
   renderSections(entry);
@@ -956,9 +973,9 @@ byId("script-form").addEventListener("submit", async (event) => {
     const created = await change("/api/jobs", {
       value: prepared
         ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared,
-            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value }
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) }
         : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value,
-            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value },
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) },
     });
     await selectJob(created.id);
     await refresh();
@@ -1034,6 +1051,18 @@ byId("retry").addEventListener("click", async (event) => {
   event.target.disabled = true;
   try {
     await change(`/api/jobs/${id}/retry`);
+    await refreshJob();
+  } catch (error) {
+    errorAt("result-error", error.message);
+    event.target.disabled = false;
+  }
+});
+
+byId("check-recording").addEventListener("click", async (event) => {
+  const id = selected;
+  event.target.disabled = true;
+  try {
+    await change(`/api/jobs/${id}/check`);
     await refreshJob();
   } catch (error) {
     errorAt("result-error", error.message);
