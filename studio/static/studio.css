@@ -304,3 +304,37 @@ audio { width: 100%; height: 42px; display: block; margin: .7rem 0; }
   .word-form, .paragraph-style { grid-template-columns: 1fr; }
   .paragraph-style input { grid-column: auto; }
 }
+
+/* Voice training */
+.training-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr); gap: 18px; align-items: start; }
+.training-side { display: grid; gap: 18px; min-width: 0; }
+.form-footer.compact { margin-top: 0; gap: .45rem; }
+.prompt-text { font-size: clamp(1.25rem, 2.2vw, 1.6rem); line-height: 1.5; margin: .4rem 0 .6rem; letter-spacing: -.01em; }
+.prompt-read-as { color: #e5f6c0; background: #2f3a22; border-radius: 8px; padding: .5rem .7rem; margin: 0 0 .6rem; line-height: 1.5; }
+.record-row { display: flex; align-items: center; gap: 1rem; margin-top: 1.2rem; flex-wrap: wrap; }
+.record-button { display: inline-flex; align-items: center; gap: .6rem; min-height: 52px; padding: 0 1.3rem; border-radius: 999px; border: 1px solid var(--line); background: var(--elevated); color: var(--ink); font-weight: 700; font-size: 1rem; cursor: pointer; }
+.record-button:hover:not(:disabled) { border-color: #77848b; }
+.record-button:disabled { opacity: .5; cursor: default; }
+.record-dot { width: .9rem; height: .9rem; border-radius: 50%; background: #ff6b5e; }
+.record-button[aria-pressed="true"] { background: #3b2928; border-color: #a14d43; }
+.record-button[aria-pressed="true"] .record-dot { border-radius: 3px; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .4; } }
+@media (prefers-reduced-motion: reduce) { .record-button[aria-pressed="true"] .record-dot { animation: none; } }
+.record-status { flex: 1; min-width: 14rem; display: grid; gap: .4rem; }
+.level-meter { height: 8px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); overflow: hidden; }
+.level-meter span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 60ms linear; }
+.level-meter span[data-hot="true"] { background: #ff6b5e; }
+.take-box { margin-top: 1rem; padding-top: .8rem; border-top: 1px solid var(--line); }
+.toggle { display: inline-flex; align-items: center; gap: .5rem; margin: 0; font-weight: 600; }
+.toggle input { width: 1.1rem; height: 1.1rem; accent-color: var(--accent); }
+.progress-track { position: relative; height: 12px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); overflow: hidden; }
+.progress-track span { display: block; height: 100%; width: 0; background: var(--accent); }
+.progress-track i { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--muted); opacity: .6; }
+.progress-labels { display: flex; justify-content: space-between; gap: .4rem; margin-top: .4rem; font-size: .76rem; }
+.progress-text { margin: .7rem 0 0; font-weight: 600; }
+.tips-list { margin: .8rem 0 0; padding-left: 1.1rem; line-height: 1.55; }
+.tips-list li + li { margin-top: .25rem; }
+
+@media (max-width: 980px) {
+  .training-grid { grid-template-columns: 1fr; }
+}

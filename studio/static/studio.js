@@ -39,7 +39,7 @@ let reviewFilter = "all";
 const sectionSelection = new Map();
 const takeSelection = new Map();
 const openMore = new Set();
-const views = ["create", "recordings", "voice", "guide"];
+const views = ["create", "recordings", "voice", "training", "guide"];
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
   repetition_penalty: 1.2, normalize_reference: true };
@@ -87,6 +87,7 @@ function showView(name, { remember = true } = {}) {
     else link.removeAttribute("aria-current");
   }
   if (remember && location.hash !== `#${currentView}`) history.replaceState(null, "", `#${currentView}`);
+  if (currentView === "training") loadDataset();
   window.scrollTo({ top: 0 });
 }
 
@@ -1413,6 +1414,256 @@ byId("reuse-script").addEventListener("click", () => {
   showView("create");
   setStep(1);
   script.focus();
+});
+
+// ---- Voice training: record prompts for a fine-tuning dataset ----
+
+let dataset = null;
+let promptIndex = 0;
+let recorder = null;
+let meterFrame = 0;
+
+const recorderWorklet = `
+class Capture extends AudioWorkletProcessor {
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (channel) this.port.postMessage(channel.slice(0));
+    return true;
+  }
+}
+registerProcessor("capture", Capture);
+`;
+
+async function loadDataset({ keepPosition = true } = {}) {
+  try {
+    const previous = dataset?.prompts[promptIndex]?.id;
+    dataset = await request("/api/dataset");
+    const found = keepPosition && previous ? dataset.prompts.findIndex((item) => item.id === previous) : -1;
+    promptIndex = found >= 0 ? found : Math.max(0, dataset.prompts.findIndex((item) => !item.take));
+    renderTraining();
+  } catch (error) {
+    errorAt("record-error", error.message);
+  }
+}
+
+function renderTraining() {
+  if (!dataset) return;
+  const total = dataset.prompts.length;
+  const prompt = dataset.prompts[promptIndex];
+  byId("prompt-position").textContent = total ? `Prompt ${promptIndex + 1} of ${total}${prompt?.source === "custom" ? " · your script" : ""}` : "No prompts";
+  byId("prompt-text").textContent = prompt ? prompt.text : "Add a script to create prompts.";
+  byId("prompt-read-as").hidden = !prompt?.read_as;
+  byId("prompt-read-as").textContent = prompt?.read_as ? `Read as: ${prompt.read_as}` : "";
+  byId("prompt-previous").disabled = promptIndex <= 0;
+  byId("prompt-next").disabled = promptIndex >= total - 1;
+  byId("prompt-unrecorded").disabled = !dataset.prompts.some((item) => !item.take);
+  byId("prompt-delete").hidden = prompt?.source !== "custom";
+  const take = prompt?.take;
+  byId("take-box").hidden = !take;
+  if (take) {
+    const audio = byId("take-audio");
+    const source = `/api/dataset/takes/${take.id}/audio`;
+    if (audio.getAttribute("src") !== source) audio.src = source;
+    byId("take-kept").checked = take.kept;
+    const check = take.check || {};
+    const node = byId("take-check");
+    node.className = `check-result ${check.status === "review" ? "check-review" : "check-pass"}`;
+    const level = check.peak_db !== undefined ? ` · peak ${check.peak_db} dB · noise ${check.noise_db} dB` : "";
+    node.textContent = check.status === "review"
+      ? `${check.reasons.join(" ")}${check.heard ? ` Heard: “${check.heard}”` : ""}`
+      : `${check.status === "pass" ? "Good take" : "Saved (words not checked)"} · ${take.duration.toFixed(1)} s${level}`;
+  }
+  const minutes = dataset.kept_minutes;
+  byId("progress-bar").style.width = `${Math.min(100, (minutes / 60) * 100)}%`;
+  byId("progress-text").textContent =
+    `${minutes} ${minutes === 1 ? "minute" : "minutes"} kept · ${dataset.recorded} of ${total} prompts recorded`;
+}
+
+function movePrompt(index) {
+  if (recorder) return;
+  promptIndex = Math.max(0, Math.min(index, (dataset?.prompts.length || 1) - 1));
+  byId("record-timer").textContent = "Press Record or the space bar, wait a moment, then read.";
+  errorAt("record-error");
+  renderTraining();
+}
+
+async function listMicrophones() {
+  try {
+    const select = byId("mic-select");
+    const chosen = select.value;
+    const devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === "audioinput");
+    select.replaceChildren(new Option("Default microphone", ""),
+      ...devices.filter((device) => device.deviceId && device.deviceId !== "default")
+        .map((device, index) => new Option(device.label || `Microphone ${index + 1}`, device.deviceId)));
+    select.value = chosen;
+  } catch (error) { /* Device names appear after microphone permission. */ }
+}
+
+function encodeWav(chunks, rate) {
+  const length = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const buffer = new ArrayBuffer(44 + length * 2);
+  const view = new DataView(buffer);
+  const text = (offset, value) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + length * 2, true); text(8, "WAVE"); text(12, "fmt ");
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, length * 2, true);
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (let index = 0; index < chunk.length; index++, offset += 2) {
+      const sample = Math.max(-1, Math.min(1, chunk[index]));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+async function startRecording() {
+  errorAt("record-error");
+  if (!navigator.mediaDevices?.getUserMedia) {
+    errorAt("record-error", "This browser cannot record audio. Open the studio in a current Chrome, Edge or Firefox.");
+    return;
+  }
+  const deviceId = byId("mic-select").value;
+  let stream;
+  try {
+    // Raw input: no echo cancellation, noise suppression or automatic gain.
+    stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      deviceId: deviceId ? { exact: deviceId } : undefined, channelCount: 1,
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  } catch (error) {
+    errorAt("record-error", "Allow microphone access for this page, then try again.");
+    return;
+  }
+  listMicrophones();
+  const context = new AudioContext();
+  const url = URL.createObjectURL(new Blob([recorderWorklet], { type: "text/javascript" }));
+  await context.audioWorklet.addModule(url);
+  URL.revokeObjectURL(url);
+  const source = context.createMediaStreamSource(stream);
+  const capture = new AudioWorkletNode(context, "capture");
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 1024;
+  const chunks = [];
+  capture.port.onmessage = (event) => chunks.push(event.data);
+  source.connect(analyser);
+  source.connect(capture);
+  recorder = { stream, context, chunks, started: performance.now(), prompt: dataset.prompts[promptIndex] };
+  byId("record-button").setAttribute("aria-pressed", "true");
+  byId("record-label").textContent = "Stop";
+  const samples = new Float32Array(analyser.fftSize);
+  const tick = () => {
+    if (!recorder) return;
+    analyser.getFloatTimeDomainData(samples);
+    const peak = samples.reduce((max, value) => Math.max(max, Math.abs(value)), 0);
+    byId("level-bar").style.width = `${Math.min(100, peak * 100)}%`;
+    byId("level-bar").dataset.hot = String(peak > 0.95);
+    const seconds = (performance.now() - recorder.started) / 1000;
+    byId("record-timer").textContent = `Recording · ${seconds.toFixed(1)} s${seconds > 40 ? " · keep it under 45 s" : ""}`;
+    if (seconds > 45) { stopRecording(); return; }
+    meterFrame = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+async function stopRecording() {
+  if (!recorder) return;
+  const { stream, context, chunks, prompt } = recorder;
+  recorder = null;
+  cancelAnimationFrame(meterFrame);
+  stream.getTracks().forEach((track) => track.stop());
+  const rate = context.sampleRate;
+  await context.close();
+  byId("record-button").setAttribute("aria-pressed", "false");
+  byId("record-label").textContent = "Record";
+  byId("level-bar").style.width = "0";
+  const blob = encodeWav(chunks, rate);
+  const seconds = chunks.reduce((total, chunk) => total + chunk.length, 0) / rate;
+  if (seconds < 1) {
+    byId("record-timer").textContent = "That was too short. Press Record, wait a moment, then read the prompt.";
+    return;
+  }
+  byId("record-timer").textContent = "Checking your take…";
+  byId("record-button").disabled = true;
+  try {
+    const data = new FormData();
+    data.append("audio", blob, "take.wav");
+    await change(`/api/dataset/prompts/${prompt.id}/take`, { value: data });
+    await loadDataset();
+    const saved = dataset.prompts[promptIndex]?.take;
+    byId("record-timer").textContent = saved?.check?.status === "review"
+      ? "Have a listen. Record again if needed, or keep it anyway."
+      : "Saved. Press Next unrecorded or the right arrow key for the next prompt.";
+  } catch (error) {
+    errorAt("record-error", error.message);
+    byId("record-timer").textContent = "";
+  } finally {
+    byId("record-button").disabled = false;
+  }
+}
+
+byId("record-button").addEventListener("click", () => (recorder ? stopRecording() : startRecording()));
+byId("prompt-previous").addEventListener("click", () => movePrompt(promptIndex - 1));
+byId("prompt-next").addEventListener("click", () => movePrompt(promptIndex + 1));
+byId("prompt-unrecorded").addEventListener("click", () => {
+  const prompts = dataset?.prompts || [];
+  const after = prompts.findIndex((item, index) => index > promptIndex && !item.take);
+  movePrompt(after >= 0 ? after : prompts.findIndex((item) => !item.take));
+});
+byId("take-kept").addEventListener("change", async (event) => {
+  const take = dataset?.prompts[promptIndex]?.take;
+  if (!take) return;
+  try {
+    await change(`/api/dataset/takes/${take.id}/kept`, { method: "PUT", value: { kept: event.target.checked } });
+    await loadDataset();
+  } catch (error) {
+    errorAt("record-error", error.message);
+  }
+});
+byId("prompt-delete").addEventListener("click", async () => {
+  const prompt = dataset?.prompts[promptIndex];
+  if (!prompt || !window.confirm("Delete this prompt and its recording?")) return;
+  try {
+    await change(`/api/dataset/prompts/${prompt.id}`, { method: "DELETE" });
+    await loadDataset({ keepPosition: false });
+  } catch (error) {
+    errorAt("record-error", error.message);
+  }
+});
+byId("prompt-add").addEventListener("click", async () => {
+  const field = byId("prompt-import");
+  if (!field.value.trim()) {
+    byId("prompt-add-status").textContent = "Paste a script first.";
+    return;
+  }
+  try {
+    const result = await change("/api/dataset/prompts", { value: { text: field.value } });
+    field.value = "";
+    byId("prompt-add-status").textContent = `${result.added} prompts added at the end of the list.`;
+    await loadDataset();
+  } catch (error) {
+    byId("prompt-add-status").textContent = error.message;
+  }
+});
+byId("dataset-export").addEventListener("click", async (event) => {
+  const output = byId("export-result");
+  event.target.disabled = true;
+  output.textContent = "Exporting…";
+  try {
+    const result = await change("/api/dataset/export");
+    output.textContent = `Exported ${result.clips} clips (${result.minutes} minutes) to ${result.folder}`;
+  } catch (error) {
+    output.textContent = error.message;
+  } finally {
+    event.target.disabled = false;
+  }
+});
+document.addEventListener("keydown", (event) => {
+  // Space records and stops; the arrow keys move between prompts. Ignored while typing.
+  if (currentView !== "training" || event.target.closest("input, textarea, select, button, audio")) return;
+  if (event.code === "Space") { event.preventDefault(); byId("record-button").click(); }
+  else if (event.key === "ArrowRight") movePrompt(promptIndex + 1);
+  else if (event.key === "ArrowLeft") movePrompt(promptIndex - 1);
 });
 
 for (const link of document.querySelectorAll("[data-view]")) {

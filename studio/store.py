@@ -1,5 +1,6 @@
 import re
 import json
+import hashlib
 import secrets
 import sqlite3
 import textwrap
@@ -161,6 +162,7 @@ class Store:
         self.voices = root / "voices"
         self.recordings = root / "recordings"
         self.originals = self.voices / "originals"
+        self.dataset = root / "dataset"
 
     @contextmanager
     def connect(self):
@@ -172,6 +174,7 @@ class Store:
     def initialize(self):
         self.voices.mkdir(parents=True, exist_ok=True)
         self.originals.mkdir(exist_ok=True)
+        (self.dataset / "takes").mkdir(parents=True, exist_ok=True)
         self.recordings.mkdir(exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
@@ -204,6 +207,23 @@ class Store:
                     pending INTEGER NOT NULL DEFAULT 1,
                     audio TEXT,
                     PRIMARY KEY (job_id, number)
+                );
+                CREATE TABLE IF NOT EXISTS dataset_prompts (
+                    id TEXT PRIMARY KEY,
+                    position INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    source TEXT NOT NULL CHECK (source IN ('builtin', 'custom')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS dataset_takes (
+                    id TEXT PRIMARY KEY,
+                    prompt_id TEXT NOT NULL UNIQUE REFERENCES dataset_prompts(id) ON DELETE CASCADE,
+                    audio TEXT NOT NULL,
+                    sample_rate INTEGER NOT NULL,
+                    duration REAL NOT NULL,
+                    check_result TEXT,
+                    kept INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS pronunciations (
                     id TEXT PRIMARY KEY,
@@ -286,6 +306,94 @@ class Store:
                 UPDATE jobs SET status = 'failed', error = 'Generation was interrupted. Retry to continue.'
                 WHERE status = 'running'
             """)
+            self.seed_prompts(db)
+
+    # ---- Training recordings ----
+
+    @staticmethod
+    def seed_prompts(db):
+        """Add any built-in prompts not yet present; ids come from the text, so this is idempotent."""
+        from .dataset_prompts import PROMPTS
+
+        existing = {row["id"] for row in db.execute("SELECT id FROM dataset_prompts WHERE source = 'builtin'")}
+        rows = [(f"b{hashlib.sha1(text.encode()).hexdigest()[:15]}", position, text, now())
+                for position, text in enumerate(PROMPTS)]
+        db.executemany("INSERT INTO dataset_prompts (id, position, text, source, created_at) VALUES (?, ?, ?, 'builtin', ?)",
+                       [row for row in rows if row[0] not in existing])
+
+    def dataset_state(self):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            prompts = db.execute("""
+                SELECT p.id, p.text, p.source, t.id AS take_id, t.duration, t.check_result, t.kept, t.created_at AS take_at
+                FROM dataset_prompts p LEFT JOIN dataset_takes t ON t.prompt_id = p.id
+                ORDER BY p.source = 'custom', p.position, p.created_at
+            """).fetchall()
+            return [dict(row) for row in prompts]
+
+    def add_prompts(self, texts):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            start = db.execute("SELECT COALESCE(MAX(position), 0) FROM dataset_prompts WHERE source = 'custom'").fetchone()[0]
+            if db.execute("SELECT COUNT(*) FROM dataset_prompts WHERE source = 'custom'").fetchone()[0] + len(texts) > 2000:
+                raise StudioError("You can add up to 2,000 of your own prompts.")
+            rows = [(f"c{new_id()[:15]}", start + index + 1, text, now()) for index, text in enumerate(texts)]
+            db.executemany("INSERT INTO dataset_prompts (id, position, text, source, created_at) VALUES (?, ?, ?, 'custom', ?)", rows)
+            return len(rows)
+
+    def delete_prompt(self, prompt_id):
+        """Remove one of the owner's prompts and return its take's audio name, if any."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            prompt = db.execute("SELECT source FROM dataset_prompts WHERE id = ?", (prompt_id,)).fetchone()
+            if prompt is None:
+                raise StudioError("Prompt not found.", 404)
+            if prompt["source"] != "custom":
+                raise StudioError("Built-in prompts can be skipped but not deleted.", 409)
+            take = db.execute("SELECT audio FROM dataset_takes WHERE prompt_id = ?", (prompt_id,)).fetchone()
+            db.execute("DELETE FROM dataset_prompts WHERE id = ?", (prompt_id,))
+            return take["audio"] if take else None
+
+    def prompt(self, prompt_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM dataset_prompts WHERE id = ?", (prompt_id,)).fetchone()
+            if row is None:
+                raise StudioError("Prompt not found.", 404)
+            return dict(row)
+
+    def save_take(self, prompt_id, take_id, audio, sample_rate, duration, result):
+        """Store a new take for a prompt, replacing any earlier one; returns the replaced audio name."""
+        kept = 1 if result.get("status") != "review" else 0
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM dataset_prompts WHERE id = ?", (prompt_id,)).fetchone() is None:
+                raise StudioError("Prompt not found.", 404)
+            previous = db.execute("SELECT audio FROM dataset_takes WHERE prompt_id = ?", (prompt_id,)).fetchone()
+            db.execute("DELETE FROM dataset_takes WHERE prompt_id = ?", (prompt_id,))
+            db.execute("""
+                INSERT INTO dataset_takes (id, prompt_id, audio, sample_rate, duration, check_result, kept, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (take_id, prompt_id, audio, sample_rate, duration, json.dumps(result), kept, now()))
+            return previous["audio"] if previous else None
+
+    def dataset_take(self, take_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM dataset_takes WHERE id = ?", (take_id,)).fetchone()
+            if row is None:
+                raise StudioError("Recording not found.", 404)
+            return dict(row)
+
+    def set_take_kept(self, take_id, kept):
+        with self.connect() as db:
+            if db.execute("UPDATE dataset_takes SET kept = ? WHERE id = ?", (1 if kept else 0, take_id)).rowcount == 0:
+                raise StudioError("Recording not found.", 404)
+
+    def kept_takes(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute("""
+                SELECT t.audio, p.text FROM dataset_takes t JOIN dataset_prompts p ON p.id = t.prompt_id
+                WHERE t.kept = 1 ORDER BY p.source = 'custom', p.position, p.created_at
+            """)]
 
     def active_voice(self, db=None):
         if db is None:

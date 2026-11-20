@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+from datetime import datetime
 import secrets
 import shutil
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from threading import Event, Thread
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Path as PathParam, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
@@ -20,6 +21,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
+from .dataset import GOALS_MINUTES, MAX_TAKE_BYTES, MAX_TAKE_SECONDS, MIN_TAKE_SECONDS, assess_take, export_dataset, recording_stats, split_prompts, training_text
 from .normalize import spoken_paragraphs, spoken_text
 from .quality import QualityChecker, expected_text, score as quality_score
 from .settings import TurboSettings
@@ -30,6 +32,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 PACKAGE = Path(__file__).parent
 LOG = logging.getLogger(__name__)
 Directions = Annotated[str, StringConstraints(strip_whitespace=True, max_length=INSTRUCTIONS_LIMIT)]
+PromptId = Annotated[str, PathParam(pattern=r"^[bc][0-9a-f]{15}$")]
 # Engine for sections without special instructions: Chatterbox, or VoxCPM2 maximum resemblance.
 VoiceMatch = Literal["standard", "maximum"]
 
@@ -50,6 +53,14 @@ class PronunciationInput(BaseModel):
 
 class LoudnessInput(BaseModel):
     target: Literal[-14.0, -16.0, -23.0, -24.0] | None
+
+
+class PromptsInput(BaseModel):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SCRIPT_LIMIT)]
+
+
+class KeptInput(BaseModel):
+    kept: bool
 
 
 class TranscriptInput(BaseModel):
@@ -405,6 +416,102 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     def spoken_preview(data: PreviewInput):
         pairs = store.pronunciation_pairs()
         return {"spoken": spoken_text(data.script, pairs), "paragraphs": spoken_paragraphs(data.script, pairs)}
+
+    # ---- Training recordings ----
+
+    def dataset_view():
+        prompts, kept_seconds, recorded = [], 0.0, 0
+        for row in store.dataset_state():
+            take = None
+            if row["take_id"]:
+                recorded += 1
+                kept_seconds += row["duration"] if row["kept"] else 0
+                take = {"id": row["take_id"], "duration": row["duration"], "kept": bool(row["kept"]),
+                        "check": json.loads(row["check_result"]) if row["check_result"] else None}
+            spoken = training_text(row["text"])
+            prompts.append({"id": row["id"], "text": row["text"], "source": row["source"],
+                            "read_as": spoken if spoken != " ".join(row["text"].split()) else None, "take": take})
+        return {"prompts": prompts, "kept_minutes": round(kept_seconds / 60, 1), "recorded": recorded,
+                "goals": list(GOALS_MINUTES), "checks_available": checker.available}
+
+    @app.get("/api/dataset")
+    def dataset():
+        return dataset_view()
+
+    @app.post("/api/dataset/prompts", dependencies=mutations, status_code=201)
+    def add_prompts(data: PromptsInput):
+        texts = split_prompts(data.text)
+        if not texts:
+            raise StudioError("Enter text with words to read.")
+        return {"added": store.add_prompts(texts)}
+
+    @app.delete("/api/dataset/prompts/{prompt_id}", dependencies=mutations, status_code=204)
+    def delete_prompt(prompt_id: PromptId):
+        audio = store.delete_prompt(prompt_id)
+        if audio:
+            (store.dataset / "takes" / audio).unlink(missing_ok=True)
+        return Response(status_code=204)
+
+    @app.post("/api/dataset/prompts/{prompt_id}/take", dependencies=mutations, status_code=201)
+    def record_take(prompt_id: PromptId,
+                    audio: Annotated[UploadFile, File()]):
+        import soundfile as sf
+
+        prompt = store.prompt(prompt_id)
+        contents = audio.file.read(MAX_TAKE_BYTES + 1)
+        if len(contents) > MAX_TAKE_BYTES:
+            raise StudioError("The recording is too large. Keep each take under 45 seconds.", 413)
+        take_id = new_id()
+        destination = store.dataset / "takes" / f"{take_id}.wav"
+        destination.write_bytes(contents)
+        try:
+            try:
+                with sf.SoundFile(destination) as handle:
+                    if handle.format not in {"WAV", "WAVEX"} or not handle.subtype.startswith("PCM_"):
+                        raise AudioError("Record a PCM WAV take.")
+                    samples, rate = handle.read(dtype="float32", always_2d=True), handle.samplerate
+            except sf.LibsndfileError as error:
+                raise AudioError("The recording could not be read as a PCM WAV.") from error
+            stats = recording_stats(samples, rate)
+            if not MIN_TAKE_SECONDS <= stats["duration"] <= MAX_TAKE_SECONDS:
+                raise AudioError("Record between 1 and 45 seconds.")
+            heard = None
+            if checker.available:
+                try:
+                    heard = checker.transcribe_locked(destination)
+                except Exception as error:
+                    LOG.warning("Training take could not be transcribed (%s)", type(error).__name__)
+            result = assess_take(prompt["text"], heard, stats)
+            previous = store.save_take(prompt_id, take_id, destination.name, rate, stats["duration"], result)
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        if previous:
+            (store.dataset / "takes" / previous).unlink(missing_ok=True)
+        return {"id": take_id, "duration": stats["duration"], "kept": result["status"] != "review", "check": result}
+
+    @app.get("/api/dataset/takes/{take_id}/audio")
+    def dataset_take_audio(take_id: UUID):
+        take = store.dataset_take(take_id.hex)
+        return file_response(store.dataset / "takes" / take["audio"], "audio/wav")
+
+    @app.put("/api/dataset/takes/{take_id}/kept", dependencies=mutations)
+    def keep_take(take_id: UUID, data: KeptInput):
+        store.set_take_kept(take_id.hex, data.kept)
+        return {"id": take_id.hex, "kept": data.kept}
+
+    @app.post("/api/dataset/export", dependencies=mutations)
+    def export_training_set():
+        takes = [(store.dataset / "takes" / row["audio"], row["text"]) for row in store.kept_takes()]
+        takes = [(path, text) for path, text in takes if path.is_file()]
+        if not takes:
+            raise StudioError("Keep at least one recording before exporting.", 409)
+        folder = store.dataset / "exports" / datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        try:
+            return export_dataset(takes, folder)
+        except Exception:
+            LOG.error("Training set export failed")
+            raise
 
     @app.put("/api/voice/{voice_id}/transcript", dependencies=mutations)
     def save_transcript(voice_id: UUID, data: TranscriptInput):

@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import threading
 from pathlib import Path
 
 from .normalize import spoken_text
@@ -111,6 +112,8 @@ class QualityChecker:
         self.model = None
         self.encoder = None
         self._reference = (None, None)
+        # The render worker and training-recording requests can use the models at the same time.
+        self._lock = threading.Lock()
 
     @property
     def available(self):
@@ -177,7 +180,15 @@ class QualityChecker:
             take = self.encoder.embeds_from_wavs([audio], rate, as_spk=True)
         return float(np.dot(self._reference[1], take))
 
+    def transcribe_locked(self, path):
+        with self._lock:
+            return self.transcribe(path)[0]
+
     def check(self, path, expected_text, reference):
+        with self._lock:
+            return self._check(path, expected_text, reference)
+
+    def _check(self, path, expected_text, reference):
         heard, duration = self.transcribe(path)
         try:
             similarity = self.similarity(path, reference)

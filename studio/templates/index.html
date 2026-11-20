@@ -21,6 +21,7 @@
         <button type="button" class="nav-link" data-view="create">New recording</button>
         <button type="button" class="nav-link" data-view="recordings">Recordings <span id="nav-queue" class="nav-count" hidden></span></button>
         <button type="button" class="nav-link" data-view="voice">Voice and words</button>
+        <button type="button" class="nav-link" data-view="training">Voice training</button>
         <button type="button" class="nav-link" data-view="guide">Guide</button>
       </nav>
       <span class="local-status"><span></span> Local · Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
@@ -264,6 +265,84 @@
         </section>
       </div>
     </section>
+    <!-- Voice training: record prompts for a fine-tuning dataset of the owner's voice. -->
+    <section id="view-training" class="view" aria-labelledby="training-heading" hidden>
+      <div class="view-heading">
+        <h1 id="training-heading">Voice training {{ tip("Recordings made here train a version of the voice model on your own speech, so it captures your rhythm and pronunciation more closely than a single reference clip. Training itself happens later on a rented GPU; this page builds the dataset.") }}</h1>
+      </div>
+      <p class="guide-lead">Read each prompt aloud in your natural voice. Each take is checked for the right words, clipping and background noise. Aim for 30 minutes of kept recordings; 60 is better. Short sessions on different days are fine.</p>
+      <div class="training-grid">
+        <section class="panel training-card" aria-labelledby="prompt-heading">
+          <div class="panel-heading">
+            <h2 id="prompt-heading"><span id="prompt-position">Prompt</span></h2>
+            <div class="form-footer compact">
+              <button type="button" class="button button-quiet" id="prompt-previous">Previous</button>
+              <button type="button" class="button button-quiet" id="prompt-next">Next</button>
+              <button type="button" class="button button-quiet" id="prompt-unrecorded">Next unrecorded</button>
+            </div>
+          </div>
+          <p id="prompt-text" class="prompt-text">Loading prompts…</p>
+          <p id="prompt-read-as" class="prompt-read-as" hidden></p>
+          <div class="record-row">
+            <button type="button" class="record-button" id="record-button" aria-pressed="false">
+              <span class="record-dot" aria-hidden="true"></span><span id="record-label">Record</span>
+            </button>
+            <div class="record-status">
+              <div class="level-meter" aria-hidden="true"><span id="level-bar"></span></div>
+              <span class="muted" id="record-timer">Press Record or the space bar, wait a moment, then read.</span>
+            </div>
+          </div>
+          <p id="record-error" class="error" role="alert" hidden></p>
+          <div id="take-box" class="take-box" hidden>
+            <audio id="take-audio" controls preload="none" aria-label="Your take"></audio>
+            <p id="take-check" class="check-result"></p>
+            <div class="form-footer compact">
+              <label class="toggle"><input type="checkbox" id="take-kept"> Use this take for training</label>
+              <span class="spacer"></span>
+              <button type="button" class="button button-quiet" id="prompt-delete" hidden>Delete this prompt</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="training-side">
+          <section class="panel" aria-labelledby="progress-heading">
+            <div class="panel-heading"><h2 id="progress-heading">Progress</h2></div>
+            <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span><i style="left: 16.6%"></i><i style="left: 50%"></i></div>
+            <div class="progress-labels muted"><span>10 min · minimum</span><span>30 min · good</span><span>60 min · best</span></div>
+            <p id="progress-text" class="progress-text">0 minutes kept</p>
+          </section>
+
+          <section class="panel" aria-labelledby="mic-heading">
+            <div class="panel-heading"><h2 id="mic-heading">Microphone {{ tip("Use the microphone you would use for real voice-overs, at the same distance every time. The studio records without noise reduction or automatic volume, so the dataset sounds like you in your room.") }}</h2></div>
+            <label for="mic-select">Input</label>
+            <select id="mic-select"><option value="">Default microphone</option></select>
+            <ul class="tips-list muted">
+              <li>Quiet room with soft furnishings; turn off fans.</li>
+              <li>About a hand's width from the microphone, slightly off to the side.</li>
+              <li>Loudest words should fill the meter about three quarters.</li>
+              <li>Read naturally, as if to one listener.</li>
+            </ul>
+          </section>
+
+          <section class="panel" aria-labelledby="own-heading">
+            <div class="panel-heading"><h2 id="own-heading">Add your own scripts {{ tip("Your own scripts are the best training material, because they match the work the voice will do. Paste a script and it is split into prompts of a sentence or two.") }}</h2></div>
+            <textarea id="prompt-import" rows="4" maxlength="{{ script_limit }}" placeholder="Paste a script you have voiced or will voice…"></textarea>
+            <div class="form-footer compact">
+              <button type="button" class="button button-quiet" id="prompt-add">Add as prompts</button>
+              <span class="muted" id="prompt-add-status" role="status"></span>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="export-heading">
+            <div class="panel-heading"><h2 id="export-heading">Export {{ tip("Writes your kept takes as 16 kHz clips with a manifest that VoxCPM2's fine-tuning reads. Your original recordings stay unchanged. The folder contains your voice: keep it private.") }}</h2></div>
+            <p class="muted instructions-hint">Creates a training folder on this computer for the next step: training on a rented GPU.</p>
+            <div class="form-footer compact"><button type="button" class="button button-quiet" id="dataset-export">Export training set</button></div>
+            <p id="export-result" class="muted instructions-hint" role="status"></p>
+          </section>
+        </div>
+      </div>
+    </section>
+
     <!-- Guide: how the studio works, for first-time use. -->
     <section id="view-guide" class="view guide" aria-labelledby="guide-heading" hidden>
       <div class="view-heading"><h1 id="guide-heading">How the studio works</h1></div>
@@ -313,6 +392,14 @@
             <li><strong>Needs review</strong> shows only flagged sections, with what the transcription heard.</li>
             <li><strong>Regenerate section</strong> makes a new take. Every take is kept; choose one under <strong>Takes</strong>.</li>
             <li><strong>More options</strong> holds the pause after a section and advanced settings.</li>
+          </ul>
+        </section>
+        <section class="panel">
+          <h2>Training your voice</h2>
+          <ul>
+            <li>Under <strong>Voice training</strong>, read short prompts aloud; each take is checked for the right words, clipping and noise.</li>
+            <li>Aim for 30 minutes of kept recordings, in several short sessions. Add your own scripts for the best results.</li>
+            <li><strong>Export training set</strong> creates the folder used to train a version of the model on your voice.</li>
           </ul>
         </section>
         <section class="panel">

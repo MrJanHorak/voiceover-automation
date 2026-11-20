@@ -115,6 +115,14 @@ On the **Settings** step, under **If a section fails its automatic check**, choo
 
 A check is a guide, not a guarantee. Transcription can miss a subtle mispronunciation or mishear a correct word, and the voice-match threshold (0.6) is provisional until it is calibrated with your recordings. Listen before delivery.
 
+### Voice training recordings
+
+**Voice training** builds a dataset for fine-tuning a model on your voice (roadmap step 7 does the training). It shows one prompt at a time: 145 built-in prompts of about 13 minutes in total, covering narration, conversation, commercial reads, instructions, questions, numbers, names and the sounds of English. Paste your own scripts under **Add your own scripts** to add more; they are the best match for your work. Aim for 30 minutes of kept recordings, and 60 for the best result.
+
+Select **Record** (or press the space bar), wait a moment, read the prompt, then select **Stop**. Prompts with numbers show a **Read as** line with the words to say. The browser records unprocessed mono PCM WAV from the chosen microphone, with no noise suppression or automatic gain. Each take is transcribed and compared with the prompt (at most 10% word differences), and checked for clipping, a quiet level and background noise above −50 dB. Takes that pass are kept automatically; a flagged take explains why, and **Use this take for training** lets you keep it anyway. Recording a prompt again replaces its take. The arrow keys move between prompts.
+
+**Export training set** writes a folder under `data\studio\dataset\exports\` with trimmed 16 kHz mono clips (the rate VoxCPM2's fine-tuning expects), `train.jsonl` and `val.jsonl` (every 20th clip, once there are at least 20) with paths relative to the folder, and a README. Original takes stay unchanged under `data\studio\dataset\takes\`. The folder contains your voice: keep it private, and delete it from rented machines after training.
+
 ### Spoken words and pronunciations
 
 Before a section is generated, the studio writes out dates, times, prices, percentages, phone numbers, years, ordinals, number ranges, web addresses and common abbreviations as words. For example, `Jan. 5 at 9 a.m.` is read as "January fifth at nine A M" and `$1,299.99` as "one thousand two hundred ninety-nine dollars and ninety-nine cents". Your script and sections keep the text as written, and bracketed sound cues are left alone.

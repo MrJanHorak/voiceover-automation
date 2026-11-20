@@ -69,6 +69,17 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
 
 Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
 
+### Voice training dataset builder · 2026-11-20 (roadmap step 6, implemented, not yet used)
+
+- **Voice training** page: one prompt at a time, record and stop with a button or the space bar, playback, a check result, and **Use this take for training**. It also has progress toward 10, 30 and 60 minutes, microphone choice and tips, **Add your own scripts**, and **Export training set**.
+- Prompts: `studio/dataset_prompts.py` has 145 original prompts, about 13 minutes of speech. Custom prompts are split from pasted text at up to 220 characters. Tables `dataset_prompts` (built-in ids derived from the text, so seeding is idempotent) and `dataset_takes` (one take per prompt; a new take replaces the old file).
+- Recording: browser AudioWorklet capture with echo cancellation, noise suppression and automatic gain off, encoded as 16-bit mono PCM WAV at the browser's rate. Uploads are validated (PCM WAV, 1–45 seconds, at most 32 MB) and stored unchanged under `data/studio/dataset/takes/`.
+- Checks (`studio/dataset.py`): Whisper transcript against the spoken form of the prompt (at most 10% word differences, plus the opening-words check), clipping, quiet peak (below −20 dB), background noise (10th percentile of 50 ms RMS above −50 dB) and duration. Failed takes are saved but not kept. The checker now has a lock, because training uploads and the render worker can transcribe at the same time.
+- Export: trimmed 16 kHz mono PCM clips (VoxCPM2's model config uses 16 kHz input and its validator rejects other rates), `train.jsonl` and `val.jsonl` with `audio` paths relative to the folder, `text` in spoken form and `duration`, plus a README. This matches `voxcpm/training/data.py` (`audio` and `text` columns; `ref_audio` and `dataset_id` are optional).
+- Checked with a mock backend, including a fake-microphone recording in headless Chrome that uploaded a mono 16-bit WAV. Tests: `tests/test_dataset.py`; the export test needs the Windows environment. A copy of the live database migrated intact with 145 prompts.
+
+Next for the owner: run the tests, restart the studio, record a few prompts with the real microphone, and check the level and noise readings; then build up 30–60 minutes over several sessions. Next roadmap step: 7, train a VoxCPM2 LoRA on a rented GPU with the exported folder, then load the adapter through audio.cpp's `lora` session option.
+
 ### Change log · 2026-11-19
 
 The sections below record what changed and why, newest first.
@@ -217,7 +228,7 @@ Work in this order. Each step should be heard and compared with the previous bes
 3. **Implemented: text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
 4. **Implemented, pending listening: delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
 5. **Implemented, first run pending: automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
-6. **Fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
+6. **Implemented, not yet used: fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
 7. **Fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.
 8. **Hands-off intake.** A watched folder or local API turns a script file into a checked WAV and MP3 for owner approval. Customer access and billing remain Phase 2.
 
