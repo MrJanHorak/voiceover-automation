@@ -10,7 +10,9 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 
 All code from 2026-11-19 is committed (latest code commit "add auto checks of generated text…"). This end-of-day update to `plan.md`, `README.md` and `AGENTS.md` was the only uncommitted change at handoff; run `git status` to confirm it was committed. The Whisper model for automatic checks finished downloading to `models/whisper-small.en`: `model.safetensors` is 966,992,008 bytes, matching its header.
 
-**Start of the next session, in PowerShell from the project folder:**
+**Status on 2026-11-20:** the steps below were completed (see the 2026-11-20 session notes under the change log). What remains is listening to the redesigned studio and the pronunciation fix, then roadmap step 6.
+
+**Start of a session, in PowerShell from the project folder:**
 
 1. Confirm the download: `dir models\whisper-small.en` should list `model.safetensors`, `config.json` and `preprocessor_config.json`. If files are missing, rerun the README download command; it resumes.
 2. Run the tests: `.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`. They have not yet been run on Windows since the 2026-11-19 changes; report any failure.
@@ -50,6 +52,22 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
 - Some tests import FastAPI, soundfile or torch and run only in the Windows environments. The model-free tests (`test_joins`, `test_spoken_text`, `test_quality`, `test_voice_match`, `test_delivery`) mostly run anywhere with numpy and FFmpeg.
 - Windows terminal noise to ignore: `ConnectionResetError [WinError 10054]`, the `pkg_resources` and `weight_norm` warnings, and VoxCPM2 progress bars stopping at 20–35%.
 - Do not upgrade huggingface_hub or other pinned packages without testing; the `hf download --include` form fetched nothing in 1.33, so the README uses `snapshot_download`.
+
+### 2026-11-20 session
+
+- **First real run of automatic checks.** Whisper and the voice encoder ran on the owner's GPU studio. All Windows tests passed (54). The "Self-check test" recording exported at −16.0 LUFS in linear mode, confirming the limiter fix. Voice match for good sections was 0.94–0.98.
+- **Pronunciation respellings.** "noo-VEX-uh" caused a gap and, in a directed section, a spoken "dash". `speakable()` in `studio/normalize.py` now joins hyphenated or mixed-case respellings into one lowercase word ("noovexuh") before synthesis; spaced letters and all-capital acronyms are unchanged, as are hyphenated words in the script itself.
+- **Check false alarms fixed.** A pronunciation-list word can never match its transcript, so `expected_text()` turns listed words into open words that match up to three heard words. The voice match is ignored for clips under 3 seconds (a good 2-second take scored 0.59), and its threshold is now 0.80 based on the owner's scores.
+- **Interface redesign.** Three pages: **New recording** (steps: Script, Settings, then the recording opens under Recordings), **Recordings** (history; player, downloads, loudness and actions; a compact section list with status dots and a **Needs review** filter; one section editor with previous/next, takes as tabs, and **More options** for pauses, engine details and Chatterbox settings), and **Voice and words** (references, transcripts, combining excerpts, pronunciations). The page is remembered in the address (`#create`, `#recordings`, `#voice`). Checked with a mock backend and screenshots at desktop and narrow widths in the cloud workspace; the owner has not used it yet.
+
+- **Owner feedback on the redesign (same day) and second pass.** Adding pronunciations and previewing spoken words were not intuitive, the preview was an unformatted block, and preparing sections was long and overwhelming. Changes:
+  - The Script step has an **Edit / Preview spoken** toggle. The preview replaces the script box with paragraphs where changed words are highlighted (automatic in green, pronunciation list in purple, original on hover); selecting any word fills the pronunciation form. `/api/spoken-preview` now also returns `paragraphs` from `spoken_paragraphs()` (difflib word alignment per paragraph).
+  - **Pronunciations** sit under the script: chips for saved words that occur in it, and a one-line add form. The full list stays on Voice and words.
+  - **Prepare sections** was removed. The Settings step has **Delivery style: Whole script / Per paragraph**; per paragraph shows one row per paragraph with a style menu (Default, examples, Custom). Long paragraphs still split into several sections, all with the paragraph's style. "Special instructions" is renamed "Delivery style" throughout the interface.
+  - A **Guide** page, a dismissible first-visit welcome (remembered in browser storage when available), and **?** tips on the main controls.
+  - Checked with the mock backend and screenshots; tests for `spoken_paragraphs` added.
+
+Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
 
 ### Change log · 2026-11-19
 

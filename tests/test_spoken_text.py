@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from studio.normalize import ordinal, spoken_text, year
+from studio.normalize import ordinal, speakable, spoken_paragraphs, spoken_text, year
 from studio.store import Store, StudioError, split_long_sentence
 
 LONG = ("Here is the part that matters most to our customers, so listen closely, because when we rebuilt the "
@@ -56,13 +56,36 @@ class NormalizeTests(unittest.TestCase):
 
     def test_pronunciations_win_and_match_whole_words(self):
         pairs = [("Kubernetes", "koo-ber-NET-eez"), ("AWS", "A W S")]
-        self.assertEqual(spoken_text("kubernetes on AWS, not AWSOME.", pairs), "koo-ber-NET-eez on A W S, not AWSOME.")
+        self.assertEqual(spoken_text("kubernetes on AWS, not AWSOME.", pairs), "kooberneteez on A W S, not AWSOME.")
+
+    def test_respellings_become_one_lowercase_word(self):
+        # Hyphens caused pauses or a spoken "dash"; capitals inside a word may be spelled out.
+        self.assertEqual([speakable(text) for text in ("noo-VEX-uh", "nooVEXuhh", "A W S", "NASA")],
+                         ["noovexuh", "noovexuhh", "A W S", "NASA"])
+        self.assertEqual(spoken_text("A well-known Nuvexa plan.", [("Nuvexa", "noo-VEX-uh")]), "A well-known noovexuh plan.")
 
     def test_number_words(self):
         self.assertEqual([ordinal(n) for n in (1, 2, 3, 12, 20, 21, 100)],
                          ["first", "second", "third", "twelfth", "twentieth", "twenty-first", "one hundredth"])
         self.assertEqual([year(n) for n in (1999, 2000, 2005, 2010, 1900)],
                          ["nineteen ninety-nine", "two thousand", "two thousand five", "twenty ten", "nineteen hundred"])
+
+
+class SpokenPreviewTests(unittest.TestCase):
+    def test_paragraphs_stay_separate_and_changes_are_marked(self):
+        text = "Welcome to Nuvexa today.\n\nOn Jan. 5, Dr. Lee [laugh] pays $19.\n\nShort and sweet."
+        paragraphs = spoken_paragraphs(text, [("Nuvexa", "noo-VEX-uh")])
+        self.assertEqual(len(paragraphs), 3)
+        changes = [[(item["text"], item["spoken"], item["kind"]) for item in paragraph if "spoken" in item] for paragraph in paragraphs]
+        self.assertEqual(changes[0], [("Nuvexa", "noovexuh", "pronunciation")])
+        self.assertIn(("Jan. 5, Dr.", "January fifth, Doctor", "auto"), changes[1])
+        self.assertIn(("$19.", "nineteen dollars.", "auto"), changes[1])
+        self.assertEqual(changes[2], [])
+        # Rejoining the written parts gives back the paragraph, sound cues included.
+        self.assertEqual(" ".join(item["text"] for item in paragraphs[1]), "On Jan. 5, Dr. Lee [laugh] pays $19.")
+
+    def test_empty_script(self):
+        self.assertEqual(spoken_paragraphs("  \n\n "), [])
 
 
 class PronunciationStoreTests(unittest.TestCase):

@@ -17,35 +17,52 @@ from .normalize import spoken_text
 LOG = logging.getLogger(__name__)
 ASR_RATE = 16000
 MAX_WORD_ERROR = 0.15  # Allows for ordinary transcription noise in otherwise correct takes.
-MIN_SIMILARITY = 0.6  # Provisional: flag only clear voice drift until the owner's takes calibrate it.
+MIN_SIMILARITY = 0.80  # The owner's good takes scored 0.94-0.98 on 2026-11-20.
+MIN_SIMILARITY_SECONDS = 3.0  # Shorter clips score unreliably (a good 2-second take scored 0.59).
+WILDCARD = "zzanywordzz"  # Stands in for pronunciation-list words, which transcription cannot spell.
+WILDCARD_SPAN = 3
 WORDS_PER_SECOND = (1.0, 4.5)
+
+
+def expected_text(text, pronunciations=()):
+    """The words a take should contain, with pronunciation-list words left open.
+
+    A respelling such as "noovexuh" never appears in a transcript, so each listed word may
+    match up to three heard words, whatever they are.
+    """
+    return spoken_text(text, [(written, WILDCARD) for written, _spoken in pronunciations])
 
 
 def comparable_words(text):
     """Lowercase words for comparison, after writing numbers and abbreviations out in full."""
     text = spoken_text(re.sub(r"\[[^\]]*\]", " ", text or "")).lower()
-    text = text.replace("-", " ").replace("’", "'")
-    return re.findall(r"[a-z0-9']+", text)
+    text = text.replace("-", " ").replace("\u2019", "'")
+    return ["*" if word == WILDCARD else word for word in re.findall(r"[a-z0-9']+", text)]
 
 
 def word_errors(expected, heard):
-    """Word-level edit distance between two word lists, with the aligned operations."""
+    """Word-level edit distance; an open word ("*") matches zero to three heard words for free."""
     rows, cols = len(expected) + 1, len(heard) + 1
     cost = [[0] * cols for _ in range(rows)]
-    for i in range(rows):
-        cost[i][0] = i
     for j in range(cols):
         cost[0][j] = j
     for i in range(1, rows):
-        for j in range(1, cols):
-            same = expected[i - 1] == heard[j - 1]
-            cost[i][j] = min(cost[i - 1][j] + 1, cost[i][j - 1] + 1, cost[i - 1][j - 1] + (0 if same else 1))
+        for j in range(cols):
+            if expected[i - 1] == "*":
+                cost[i][j] = min(cost[i - 1][j - span] for span in range(0, min(WILDCARD_SPAN, j) + 1))
+            elif j == 0:
+                cost[i][0] = cost[i - 1][0] + 1
+            else:
+                same = expected[i - 1] == heard[j - 1]
+                cost[i][j] = min(cost[i - 1][j] + 1, cost[i][j - 1] + 1, cost[i - 1][j - 1] + (0 if same else 1))
     return cost[-1][-1]
 
 
 def first_difference(expected, heard):
     """The first few expected words that were missed or changed, to explain a failed check."""
     for index, word in enumerate(expected):
+        if word == "*":
+            return ""  # Alignment after an open word is uncertain; the percentage still reports the gap.
         if index >= len(heard) or heard[index] != word:
             return " ".join(expected[index:index + 6])
     return ""
@@ -63,14 +80,14 @@ def assess(expected_text, heard_text, duration, similarity=None):
     """Combine transcription, voice match and pace into one result for a take."""
     expected, heard = comparable_words(expected_text), comparable_words(heard_text)
     errors = word_errors(expected, heard)
-    rate = errors / max(1, len(expected))
+    rate = errors / max(1, len([word for word in expected if word != "*"]))
     reasons = []
     if rate > MAX_WORD_ERROR:
         missed = first_difference(expected, heard)
         reasons.append(f"Words differ from the script ({rate:.0%})" + (f", starting near “{missed}”" if missed else ""))
     elif opening_errors(expected, heard) >= 2:
-        reasons.append(f"The opening words may be unclear (expected \u201c{' '.join(expected[:6])}\u201d)")
-    if similarity is not None and similarity < MIN_SIMILARITY:
+        reasons.append(f"The opening words may be unclear (expected \u201c{' '.join(expected[:6]).replace('*', '…')}\u201d)")
+    if similarity is not None and duration >= MIN_SIMILARITY_SECONDS and similarity < MIN_SIMILARITY:
         reasons.append(f"Voice match is low ({similarity:.2f})")
     pace = len(expected) / duration if duration > 0 else 0
     if expected and not WORDS_PER_SECOND[0] <= pace <= WORDS_PER_SECOND[1]:

@@ -20,8 +20,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
-from .normalize import spoken_text
-from .quality import QualityChecker, score as quality_score
+from .normalize import spoken_paragraphs, spoken_text
+from .quality import QualityChecker, expected_text, score as quality_score
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 
@@ -143,10 +143,10 @@ def render_attempt(store, engine, directed, job, section, folder, reference, spo
     return filename
 
 
-def check_take(store, checker, job_id, number, path, spoken, reference):
+def check_take(store, checker, job_id, number, path, expected, reference):
     """Run the automatic check for one take; a checker failure never stops the recording."""
     try:
-        result = checker.check(path, spoken, reference)
+        result = checker.check(path, expected, reference)
     except Exception as error:
         LOG.warning("Automatic check could not run (%s)", type(error).__name__)
         result = {"status": "error", "reasons": ["The automatic check could not run."]}
@@ -172,8 +172,8 @@ def render_job(store, engine, directed, stop, job_id, checker=None):
                 return
             if section["audio"] and not section["pending"]:
                 current = next((take for take in section.get("takes", []) if take["audio"] == section["audio"]), {})
-                spoken = current.get("spoken") or spoken_text(section["text"], pairs)
-                check_take(store, checker, job_id, section["number"], folder / section["audio"], spoken, reference)
+                expected = expected_text(current.get("text") or section["text"], pairs)
+                check_take(store, checker, job_id, section["number"], folder / section["audio"], expected, reference)
 
     pending = [section for section in job["sections"] if section["pending"]]
     if getattr(directed, "needs_exclusive_gpu", False):
@@ -182,13 +182,14 @@ def render_job(store, engine, directed, stop, job_id, checker=None):
     for section in pending:
         # Models receive normalized words; the section keeps the text as written.
         spoken = spoken_text(section["text"], pairs)
+        expected = expected_text(section["text"], pairs)
         attempts = []
         for attempt in range(1 + retries):
             if stop.is_set():
                 return
             seed = section["seed"] if attempt == 0 else secrets.randbelow(2147483647) + 1
             filename = render_attempt(store, engine, directed, job, section, folder, reference, spoken, seed)
-            result = check_take(store, checker, job_id, section["number"], folder / filename, spoken, reference) if checking else None
+            result = check_take(store, checker, job_id, section["number"], folder / filename, expected, reference) if checking else None
             attempts.append((filename, result))
             if result is None or result.get("status") == "pass":
                 break
@@ -402,7 +403,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
 
     @app.post("/api/spoken-preview", dependencies=mutations)
     def spoken_preview(data: PreviewInput):
-        return {"spoken": spoken_text(data.script, store.pronunciation_pairs())}
+        pairs = store.pronunciation_pairs()
+        return {"spoken": spoken_text(data.script, pairs), "paragraphs": spoken_paragraphs(data.script, pairs)}
 
     @app.put("/api/voice/{voice_id}/transcript", dependencies=mutations)
     def save_transcript(voice_id: UUID, data: TranscriptInput):

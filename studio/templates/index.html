@@ -1,4 +1,7 @@
 <!doctype html>
+{% macro tip(text, label="More about this") -%}
+<details class="setting-help tip"><summary aria-label="{{ label }}">?</summary><p>{{ text }}</p></details>
+{%- endmacro %}
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -14,96 +17,206 @@
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
-      <span class="local-status"><span></span> Local workspace</span>
+      <nav class="main-nav" aria-label="Studio">
+        <button type="button" class="nav-link" data-view="create">New recording</button>
+        <button type="button" class="nav-link" data-view="recordings">Recordings <span id="nav-queue" class="nav-count" hidden></span></button>
+        <button type="button" class="nav-link" data-view="voice">Voice and words</button>
+        <button type="button" class="nav-link" data-view="guide">Guide</button>
+      </nav>
+      <span class="local-status"><span></span> Local · Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
     </div>
   </header>
-  <main class="workspace">
-    <div class="page-title">
-      <h1>Create a voice-over</h1>
-      <p>Your voice and scripts stay on this computer.</p>
-    </div>
 
-    <div class="work-grid">
-      <section class="panel script-panel" aria-labelledby="script-heading">
-        <div class="panel-heading">
-          <h2 id="script-heading">Script</h2>
-          <button class="button button-quiet" id="import-script" type="button">Import script</button>
-          <input id="script-file" type="file" accept=".txt,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+  <main class="workspace">
+    <!-- New recording: write the script, choose settings, then generate. -->
+    <section id="view-create" class="view" aria-labelledby="create-heading">
+      <div id="welcome" class="welcome" hidden>
+        <div>
+          <strong>Welcome to your voice-over studio</strong>
+          <p>Three steps: write or import your script and check how it will be spoken, choose how it should sound, then review each section and download the recording. Everything runs on this computer.</p>
         </div>
-        <form id="script-form">
+        <div class="welcome-actions">
+          <button type="button" class="button button-quiet" data-view="guide">Read the guide</button>
+          <button type="button" class="button button-quiet" id="welcome-dismiss">Got it</button>
+        </div>
+      </div>
+      <div class="view-heading">
+        <h1 id="create-heading">New recording</h1>
+        <ol class="steps" aria-label="Steps">
+          <li><button type="button" class="step" data-step="1"><span class="step-number">1</span> Script</button></li>
+          <li><button type="button" class="step" data-step="2"><span class="step-number">2</span> Settings</button></li>
+          <li><button type="button" class="step" data-step="3"><span class="step-number">3</span> Review and export</button></li>
+        </ol>
+      </div>
+      <form id="script-form" class="step-form">
+        <section class="panel step-panel" id="step-1" aria-labelledby="script-heading">
+          <div class="panel-heading">
+            <h2 id="script-heading">Script {{ tip("Write or paste what your voice should read. Leave a blank line between paragraphs: paragraphs get a longer pause, and each one can have its own delivery style in the next step. Import reads .txt, .docx and text-based .pdf files.") }}</h2>
+            <button class="button button-quiet" id="import-script" type="button">Import script</button>
+            <input id="script-file" type="file" accept=".txt,.docx,.pdf,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+          </div>
           <label for="recording-title">Recording title <span class="muted">· Optional</span></label>
-          <input id="recording-title" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Studio demo">
-          <label for="script">Script text</label>
-          <textarea id="script" rows="10" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
-          <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
+          <input id="recording-title" type="text" maxlength="100" autocomplete="off" placeholder="Spring update">
+          <div class="label-row">
+            <label for="script" id="script-label">Script text</label>
+            <div class="segmented" role="group" aria-label="Script view">
+              <button type="button" id="mode-edit" aria-pressed="true">Edit</button>
+              <button type="button" id="mode-preview" aria-pressed="false">Preview spoken</button>
+            </div>
+          </div>
+          <div id="script-edit">
+            <textarea id="script" rows="12" maxlength="{{ script_limit }}" placeholder="Paste or write what you want your voice to read…" required></textarea>
+            <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
+          </div>
+          <div id="spoken-view" class="spoken-view" hidden aria-live="polite">
+            <p class="spoken-legend"><span class="mark-sample auto">Highlighted</span> words are read differently from how they're written; hover to see the original. <span class="mark-sample pronunciation">Purple</span> words use your pronunciations. Select any word to change how it's said.</p>
+            <div id="spoken-text" class="spoken-text"></div>
+          </div>
           <p id="import-notice" class="muted instructions-hint" role="status" hidden></p>
-          <p class="muted instructions-hint">Experimental delivery tags may have little audible effect. Vocal sounds are supported by Chatterbox.</p>
+
+          <div class="script-words" id="script-words-box">
+            <div class="label-row">
+              <span class="field-label">Pronunciations {{ tip("Teach the voice names, brands or acronyms it says wrong. Type the word as written, then how to say it as one lowercase word, like noovexuh. Saved words apply to all your recordings; manage the full list under Voice and words.") }}</span>
+            </div>
+            <ul id="script-words" class="word-chips" aria-label="Pronunciations used in this script"></ul>
+            <div class="word-form">
+              <input id="word-written" type="text" maxlength="100" placeholder="Word as written, like Nuvexa" autocomplete="off" aria-label="Word as written">
+              <input id="word-spoken" type="text" maxlength="200" placeholder="Say it as, like noovexuh" autocomplete="off" aria-label="How to say it">
+              <button class="button button-quiet" id="word-save" type="button">Save</button>
+            </div>
+            <p id="word-error" class="error" role="alert" hidden></p>
+          </div>
+
+          <div class="form-footer step-footer">
+            <span class="spacer"></span>
+            <button class="button button-primary" type="button" id="to-settings">Continue to settings</button>
+          </div>
+        </section>
+
+        <section class="panel step-panel" id="step-2" aria-labelledby="settings-heading" hidden>
+          <div class="panel-heading"><h2 id="settings-heading">Settings</h2></div>
+          <div class="summary-row">
+            <span class="muted">Voice reference</span>
+            <strong id="settings-voice">Checking…</strong>
+            <button type="button" class="link-button" data-view="voice">Change</button>
+            {{ tip("The recording of your voice that the model copies. Add or switch references, and save the transcript needed for maximum resemblance, under Voice and words.") }}
+          </div>
           <div id="script-engine"></div>
-          <div id="script-instructions"></div>
-          <div id="script-advanced"></div>
           <div class="instructions-control">
-            <label for="auto-retries">If a section fails its automatic check</label>
+            <div class="label-row">
+              <span class="field-label">Delivery style {{ tip("Optional directions for how to read, such as calm, energetic or whispered. Use one style for the whole script, or give individual paragraphs their own style. Styles use VoxCPM2's directed mode, which does not use the reference transcript.") }}</span>
+              <div class="segmented" role="group" aria-label="Delivery style">
+                <button type="button" id="style-whole" aria-pressed="true">Whole script</button>
+                <button type="button" id="style-paragraphs" aria-pressed="false">Per paragraph</button>
+              </div>
+            </div>
+            <div id="script-instructions"></div>
+            <ol id="paragraph-styles" class="paragraph-styles" hidden aria-label="Delivery style per paragraph"></ol>
+          </div>
+          <div class="instructions-control">
+            <div class="label-row">
+              <label for="auto-retries">If a section fails its automatic check</label>
+              {{ tip("After each section is generated, the studio transcribes it on this computer, compares it with your script, and checks the voice and pace. A failed section can be generated again automatically; every take is kept so you can still choose.") }}
+            </div>
             <select id="auto-retries" {% if not checks_available %}disabled{% endif %}>
               <option value="1">Generate once more and keep the better take</option>
               <option value="2">Generate up to twice more and keep the best take</option>
               <option value="0">Keep it and mark it for review</option>
             </select>
-            <p class="muted instructions-hint">
-              {% if checks_available %}Each new section is transcribed on this computer and compared with the script, its voice is compared with your reference, and its pace is checked. Checks add a few seconds per section; each retry adds another generation. Every take stays under All takes.
-              {% else %}Automatic checks are not set up. Download the speech-recognition model described in the README, then restart the studio.{% endif %}
-            </p>
+            {% if not checks_available %}<p class="muted instructions-hint">Automatic checks are not set up. Download the speech-recognition model described in the README, then restart the studio.</p>{% endif %}
           </div>
-          <details id="pronunciations" class="advanced-settings">
-            <summary>Pronunciations and spoken words</summary>
-            <p class="muted advanced-intro">Dates, times, prices, percentages, phone numbers, years and common abbreviations are written out as words before the voice reads them; your script stays as written. Add words the voice gets wrong, such as names, brands or acronyms. Changes apply to sections generated afterwards.</p>
-            <ul id="pronunciation-list" class="pronunciation-list" aria-label="Saved pronunciations"></ul>
-            <div class="pronunciation-form">
-              <label for="pronunciation-written">Written <input id="pronunciation-written" maxlength="100" placeholder="e.g. Kubernetes" autocomplete="off"></label>
-              <label for="pronunciation-spoken">Say it as <input id="pronunciation-spoken" maxlength="200" placeholder="e.g. koo-ber-NET-eez" autocomplete="off"></label>
-              <button class="button button-quiet" id="pronunciation-add" type="button">Save word</button>
-            </div>
-            <p id="pronunciation-error" class="error" role="alert" hidden></p>
-            <div class="form-footer"><button class="button button-quiet" id="spoken-preview-button" type="button">Preview spoken words</button></div>
-            <p id="spoken-preview" class="take-text" hidden></p>
-          </details>
-          <div class="form-footer"><button class="button button-quiet" type="button" id="prepare-sections">Prepare sections</button></div>
-          <div id="prepared-editor" hidden>
-            <p class="muted">Edit each section before generating. Sections with sound cues use Chatterbox. Sections with special instructions use VoxCPM2.</p>
-            <div id="prepared-sections" class="section-list"></div>
-            <div class="form-footer">
-              <button class="button button-quiet" type="button" id="add-section">Add section</button>
-              <button class="button button-quiet" type="button" id="back-to-script">Back to script</button>
-            </div>
-          </div>
-          <p id="script-error" class="error" role="alert" hidden></p>
-          <div class="form-footer">
-            <button class="button button-primary" id="generate" type="submit" disabled>Generate voice-over</button>
+          <div id="script-advanced"></div>
+          <div class="form-footer step-footer">
+            <button class="button button-quiet" type="button" id="back-to-step-1">Back to script</button>
             <span class="muted" id="queue-note"></span>
+            <span class="spacer"></span>
+            <button class="button button-primary" id="generate" type="submit" disabled>Generate voice-over</button>
           </div>
-        </form>
-      </section>
+        </section>
+        <p id="script-error" class="error" role="alert" hidden></p>
+      </form>
+    </section>
 
-      <aside class="side-grid" aria-label="Voice and output">
+    <!-- Recordings: history, then the selected recording's export and sections. -->
+    <section id="view-recordings" class="view" aria-labelledby="recordings-heading" hidden>
+      <div class="view-heading"><h1 id="recordings-heading">Recordings</h1></div>
+      <div class="recordings-grid">
+        <aside class="panel history-panel" aria-label="Saved recordings">
+          <p id="history-empty" class="muted">Your recordings will appear here.</p>
+          <ul id="history" class="history" aria-label="Saved recordings"></ul>
+        </aside>
+        <div class="recording-detail">
+          <section class="panel result-panel" aria-labelledby="result-heading">
+            <div class="panel-heading">
+              <h2 id="result-heading">Recording</h2>
+              <span id="result-status" class="status" hidden></span>
+            </div>
+            <div id="result-message" class="result-message" role="status" aria-live="polite">Generate a voice-over to play and download it here.</div>
+            <p id="result-error" class="error" role="alert" hidden></p>
+            <div id="export" hidden>
+              <audio id="result-audio" aria-label="Full recording" controls preload="metadata"></audio>
+              <div class="export-row">
+                <div class="downloads">
+                  <a class="button button-quiet" id="download-wav">Download WAV</a>
+                  <a class="button button-quiet" id="download-mp3">Download MP3</a>
+                </div>
+                <div id="loudness-control" class="loudness-control" hidden>
+                  <div class="label-row"><label for="loudness-target">Delivery loudness</label>{{ tip("How loud the finished file is, measured the way streaming and broadcast services do. Pick where it will play. Changing this rebuilds the files without generating speech again.") }}</div>
+                  <select id="loudness-target">
+                    <option value="-16">−16 LUFS · podcasts and web</option>
+                    <option value="-14">−14 LUFS · online video and streaming</option>
+                    <option value="-23">−23 LUFS · broadcast (EBU R128)</option>
+                    <option value="-24">−24 LUFS · US broadcast (ATSC A/85)</option>
+                    <option value="">Off · section balancing only</option>
+                  </select>
+                </div>
+              </div>
+              <p class="muted instructions-hint" id="loudness-result"></p>
+            </div>
+            <div class="form-footer">
+              <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
+              <button class="button button-quiet" id="check-recording" type="button" hidden>Check recording</button>
+              <button class="button button-quiet" id="balance" type="button" hidden>Balance volume</button>
+              <button class="button button-quiet" id="reuse-script" type="button" hidden>Use script for a new recording</button>
+            </div>
+          </section>
+
+          <section class="panel" id="review" aria-labelledby="review-heading" hidden>
+            <div class="panel-heading">
+              <h2 id="review-heading">Sections {{ tip("Green: the automatic check passed. Amber: worth a listen; select it to see what the transcription heard. Outline: waiting to be generated. Grey: not checked. Select a section to edit it, or use the play button to listen.") }}</h2>
+              <div id="review-filter" class="filter-chips" role="group" aria-label="Show sections"></div>
+            </div>
+            <div class="review-grid">
+              <ol id="sections" class="section-rows" aria-label="Sections"></ol>
+              <div id="section-editor" class="section-editor" aria-live="polite"></div>
+            </div>
+            <audio id="section-player" preload="none" hidden></audio>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <!-- Voice and words: references, transcripts and pronunciations, set up once. -->
+    <section id="view-voice" class="view" aria-labelledby="voice-view-heading" hidden>
+      <div class="view-heading"><h1 id="voice-view-heading">Voice and words</h1></div>
+      <div class="voice-grid">
         <section class="panel" aria-labelledby="voice-heading">
-          <div class="panel-heading">
-            <h2 id="voice-heading">Voice reference</h2>
-            <span class="muted device">Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
-          </div>
+          <div class="panel-heading"><h2 id="voice-heading">Voice reference {{ tip("A 6–30 second WAV of you speaking, which the model copies. Record in a quiet room at a steady distance from the microphone, in the delivery you want. The active reference is used for new recordings.") }}</h2></div>
           <div class="reference-card">
             <span class="wave-mark reference-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
             <div class="voice-details"><strong id="voice-name">Checking for a reference…</strong><div class="muted" id="voice-duration"></div></div>
           </div>
           <div id="saved-references" hidden>
-            <label for="voice-selection">Saved references</label>
+            <label for="voice-selection">Active reference</label>
             <select id="voice-selection"></select>
           </div>
           <audio id="voice-audio" aria-label="Active voice reference" controls preload="none" hidden></audio>
           <p id="voice-error" class="error" role="alert" hidden></p>
           <details id="reference-transcript" class="reference-enrollment" hidden>
             <summary>Reference transcript <span class="muted" id="transcript-state"></span></summary>
-            <p class="muted instructions-hint">Type exactly what you say in this reference, word for word, including repeated words. Maximum resemblance continues from this recording, so a wrong word can cause mispronunciations or artifacts.</p>
+            <p class="muted instructions-hint">Type exactly what you say in this reference, word for word. Maximum resemblance continues from this recording, so a wrong word can cause mispronunciations or artifacts.</p>
             <label for="voice-transcript">Words spoken in the reference</label>
-            <textarea id="voice-transcript" rows="4" maxlength="{{ transcript_limit }}" placeholder="e.g. Hi, I'm recording this sample in my normal speaking voice…"></textarea>
+            <textarea id="voice-transcript" rows="4" maxlength="{{ transcript_limit }}" placeholder="Hi, I'm recording this sample in my normal speaking voice…"></textarea>
             <div class="form-footer">
               <button class="button button-quiet" id="save-transcript" type="button" disabled>Save transcript</button>
               <span class="muted" id="transcript-status" role="status"></span>
@@ -112,7 +225,7 @@
           <details id="new-reference" class="reference-enrollment">
             <summary>Add reference WAV</summary>
             <label for="voice-label">Reference name <span class="muted">· Optional</span></label>
-            <input id="voice-label" type="text" maxlength="100" placeholder="e.g. Warm narration">
+            <input id="voice-label" type="text" maxlength="100" placeholder="Warm narration">
             <div class="reference-actions">
               <button class="button button-quiet" id="choose-voice" type="button">Choose WAV</button>
               <input id="voice-file" type="file" accept=".wav,audio/wav" hidden>
@@ -123,7 +236,7 @@
             <summary>Combine reference excerpts</summary>
             <p class="muted instructions-hint">Choose excerpts in the order you want to hear them. Aim for 10–15 seconds; the combined reference must be 6–30 seconds. Originals stay unchanged.</p>
             <label for="mix-name">New reference name <span class="muted">· Optional</span></label>
-            <input id="mix-name" maxlength="100" placeholder="e.g. Combined narration">
+            <input id="mix-name" maxlength="100" placeholder="Combined narration">
             <div id="mix-excerpts" class="section-list"></div>
             <div class="form-footer">
               <button class="button button-quiet" id="mix-add" type="button">Add excerpt</button>
@@ -138,45 +251,80 @@
           </details>
         </section>
 
-        <section class="panel result-panel" aria-labelledby="result-heading">
-          <div class="panel-heading"><h2 id="result-heading">Recording</h2><span id="result-status" class="status" hidden></span></div>
-          <div id="result-message" class="result-message" role="status" aria-live="polite">Generate a voice-over to play and download it here.</div>
-          <p id="result-error" class="error" role="alert" hidden></p>
-          <div id="export" hidden>
-            <audio id="result-audio" aria-label="Full recording" controls preload="metadata"></audio>
-            <div class="downloads">
-              <a class="button button-quiet" id="download-wav">Download WAV</a>
-              <a class="button button-quiet" id="download-mp3">Download MP3</a>
-            </div>
+        <section class="panel" aria-labelledby="pronunciation-heading">
+          <div class="panel-heading"><h2 id="pronunciation-heading">Pronunciations {{ tip("Every saved word applies to all recordings generated afterwards. You can also add words while writing a script.") }}</h2></div>
+          <p class="muted instructions-hint">Dates, times, prices, percentages, phone numbers and common abbreviations are read out automatically. Add names, brands or acronyms the voice gets wrong. Spell each as one lowercase word, like <em>noovexuh</em>; hyphens and capitals are joined automatically because voices read them as pauses or letters. Changes apply to sections generated afterwards.</p>
+          <ul id="pronunciation-list" class="pronunciation-list" aria-label="Saved pronunciations"></ul>
+          <div class="pronunciation-form">
+            <label for="pronunciation-written">Written <input id="pronunciation-written" type="text" maxlength="100" placeholder="Kubernetes" autocomplete="off"></label>
+            <label for="pronunciation-spoken">Say it as <input id="pronunciation-spoken" type="text" maxlength="200" placeholder="kooberneteez" autocomplete="off"></label>
+            <button class="button button-quiet" id="pronunciation-add" type="button">Save word</button>
           </div>
-          <div id="loudness-control" class="loudness-control" hidden>
-            <label for="loudness-target">Delivery loudness</label>
-            <select id="loudness-target">
-              <option value="-16">−16 LUFS · podcasts and web</option>
-              <option value="-14">−14 LUFS · online video and streaming</option>
-              <option value="-23">−23 LUFS · broadcast (EBU R128)</option>
-              <option value="-24">−24 LUFS · US broadcast (ATSC A/85)</option>
-              <option value="">Off · section balancing only</option>
-            </select>
-            <p class="muted instructions-hint" id="loudness-result"></p>
-          </div>
-          <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
-          <button class="button button-quiet" id="balance" type="button" hidden>Balance volume</button>
-          <button class="button button-quiet" id="check-recording" type="button" hidden>Check recording</button>
+          <p id="pronunciation-error" class="error" role="alert" hidden></p>
         </section>
-      </aside>
-    </div>
-
-    <section class="panel wide-panel" id="review" aria-labelledby="review-heading" hidden>
-      <div class="panel-heading"><h2 id="review-heading">Sections</h2><button class="button button-quiet" id="reuse-script" type="button">Use original script</button></div>
-      <p class="muted review-hint">Edit what a section says, add a vocal sound, or adjust the silence between sections.</p>
-      <div id="sections" class="section-list"></div>
+      </div>
     </section>
+    <!-- Guide: how the studio works, for first-time use. -->
+    <section id="view-guide" class="view guide" aria-labelledby="guide-heading" hidden>
+      <div class="view-heading"><h1 id="guide-heading">How the studio works</h1></div>
+      <p class="guide-lead">Turn a script into a recording in your own voice, in three steps. Set up your voice once under Voice and words; after that, most recordings take a few minutes of your attention.</p>
 
-    <section class="panel wide-panel" aria-labelledby="history-heading">
-      <div class="panel-heading"><h2 id="history-heading">Recording history</h2></div>
-      <p id="history-empty" class="muted">Your recordings will appear here.</p>
-      <ul id="history" class="history" aria-label="Saved recordings"></ul>
+      <ol class="guide-steps">
+        <li class="panel">
+          <span class="step-number">1</span>
+          <h2>Script</h2>
+          <p>Paste or import your text. Leave a blank line between paragraphs.</p>
+          <p>Select <strong>Preview spoken</strong> to read exactly what the voice will say. Dates, prices, times and abbreviations are written out for you, and highlighted. If a name or brand will come out wrong, select it and type how to say it.</p>
+        </li>
+        <li class="panel">
+          <span class="step-number">2</span>
+          <h2>Settings</h2>
+          <p>Choose the <strong>voice engine</strong>: Chatterbox Turbo is fast; Maximum resemblance sounds most like you but takes longer.</p>
+          <p>Optionally add a <strong>delivery style</strong>, such as "warm, conversational narrator", for the whole script or per paragraph. Then select <strong>Generate voice-over</strong>.</p>
+        </li>
+        <li class="panel">
+          <span class="step-number">3</span>
+          <h2>Review and export</h2>
+          <p>Each section is checked automatically. A <span class="state-dot inline" data-state="pass"></span> green dot passed; an <span class="state-dot inline" data-state="review"></span> amber dot needs a listen.</p>
+          <p>Select a section to fix its words or try another take, then download the WAV or MP3.</p>
+        </li>
+      </ol>
+
+      <div class="guide-grid">
+        <section class="panel">
+          <h2>Set up your voice once</h2>
+          <ul>
+            <li>Record 10–30 seconds of yourself in a quiet room, in the style you want to sound like, and save it as a WAV.</li>
+            <li>Add it under <strong>Voice and words</strong>, then type exactly what you said in <strong>Reference transcript</strong>. Maximum resemblance needs it.</li>
+            <li>Keep several references, such as conversational and energetic, and switch between them.</li>
+          </ul>
+        </section>
+        <section class="panel">
+          <h2>Pronunciations</h2>
+          <ul>
+            <li>Spell how a word sounds as one lowercase word, like <em>noovexuh</em> for Nuvexa.</li>
+            <li>Saved words apply to every recording made afterwards.</li>
+            <li>Avoid hyphens and capitals inside the spelling; the studio removes them because voices read them as pauses or letters.</li>
+          </ul>
+        </section>
+        <section class="panel">
+          <h2>Reviewing sections</h2>
+          <ul>
+            <li><strong>Needs review</strong> shows only flagged sections, with what the transcription heard.</li>
+            <li><strong>Regenerate section</strong> makes a new take. Every take is kept; choose one under <strong>Takes</strong>.</li>
+            <li><strong>More options</strong> holds the pause after a section and advanced settings.</li>
+          </ul>
+        </section>
+        <section class="panel">
+          <h2>Delivering the file</h2>
+          <ul>
+            <li>Choose <strong>Delivery loudness</strong> to match where it will play: −16 LUFS for web and podcasts, −14 for online video, −23 or −24 for broadcast.</li>
+            <li>Changing it rebuilds the files without generating speech again.</li>
+            <li>Listen to the whole recording before you send it. Checks help, but your ear decides.</li>
+          </ul>
+        </section>
+      </div>
+      <div class="form-footer"><button type="button" class="button button-primary" data-view="create">Start a new recording</button></div>
     </section>
   </main>
   <template id="delivery-cues">
@@ -207,21 +355,21 @@
   </template>
   <template id="voice-engine">
     <div class="instructions-control">
-      <label for="">Voice engine</label>
+      <div class="label-row">
+        <label for="">Voice engine</label>
+        {{ tip("Chatterbox Turbo is fast and supports sound cues such as [laugh]. Maximum resemblance uses VoxCPM2 with your reference and its transcript: it sounds most like you but is slower, and sound cues are not available. Sections with a delivery style always use VoxCPM2's directed mode.") }}
+      </div>
       <select>
         <option value="standard">Chatterbox Turbo · fast</option>
-        <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance · VoxCPM2 with reference transcript</option>
+        <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance · sounds most like you</option>
       </select>
-      <p class="muted instructions-hint">
-        {% if directed_available %}Maximum resemblance is slower and needs the reference transcript. Sound cues are not available with it. Sections with special instructions always use VoxCPM2's directed mode.
-        {% else %}Set up local VoxCPM2 to use maximum resemblance. See the README.{% endif %}
-      </p>
+      {% if not directed_available %}<p class="muted instructions-hint">Set up local VoxCPM2 to use maximum resemblance. See the README.</p>{% endif %}
     </div>
   </template>
   <template id="delivery-instructions">
     <div class="instructions-control">
       <div class="instructions-heading">
-        <label for="">Special instructions <span class="muted">· Optional</span></label>
+        <label for="">Delivery style <span class="muted">· Optional</span></label>
         <select aria-label="Choose a delivery example">
           <option value="">Choose an example</option>
           <option value="hushed whisper, slow, with deliberate pauses">Hushed whisper</option>

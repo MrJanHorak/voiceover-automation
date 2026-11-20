@@ -20,7 +20,11 @@ let referenceBusy = false;
 let voiceRevision = 0;
 let mixRevision = 0;
 let mixPreviewUrl = null;
-let prepared = null;
+let scriptMode = "edit";
+let styleMode = "whole";
+let paragraphs = [];
+let paragraphsFor = null;
+let spokenRequest = 0;
 const sectionDrafts = new Map();
 const pauseDrafts = new Map();
 const instructionDrafts = new Map();
@@ -29,6 +33,13 @@ const matchDrafts = new Map();
 let transcriptVoice = null;
 let transcriptDirty = false;
 let pronunciationSignature = "";
+let currentView = "create";
+let currentStep = 1;
+let reviewFilter = "all";
+const sectionSelection = new Map();
+const takeSelection = new Map();
+const openMore = new Set();
+const views = ["create", "recordings", "voice", "guide"];
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
   repetition_penalty: 1.2, normalize_reference: true };
@@ -68,6 +79,29 @@ function change(url, { method = "POST", value } = {}) {
   return request(url, { method, headers, body });
 }
 
+function showView(name, { remember = true } = {}) {
+  currentView = views.includes(name) ? name : "create";
+  for (const view of views) byId(`view-${view}`).hidden = view !== currentView;
+  for (const link of document.querySelectorAll(".nav-link")) {
+    if (link.dataset.view === currentView) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  if (remember && location.hash !== `#${currentView}`) history.replaceState(null, "", `#${currentView}`);
+  window.scrollTo({ top: 0 });
+}
+
+function setStep(step) {
+  currentStep = step;
+  byId("step-1").hidden = step !== 1;
+  byId("step-2").hidden = step !== 2;
+  if (step === 2 && styleMode === "paragraphs") refreshParagraphs();
+  for (const button of document.querySelectorAll(".step")) {
+    if (Number(button.dataset.step) === step) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  updateEditor();
+}
+
 function matchReady(instructions, match) {
   // Maximum resemblance applies only to sections without special instructions.
   return instructions.trim() || match !== "maximum" || (directedAvailable && Boolean(state.voice?.transcript));
@@ -78,12 +112,14 @@ function updateEditor() {
   const directed = Boolean(scriptDirections.field.value.trim());
   const match = scriptEngine.field.value;
   scriptSounds.disabled = directed || match === "maximum";
-  const ready = prepared
-    ? prepared.every((part) => part.text.trim() && (!part.instructions.trim() || directedAvailable) && matchReady(part.instructions, match))
+  const perParagraph = styleMode === "paragraphs";
+  const ready = perParagraph
+    ? paragraphs.length > 0 && paragraphsFor === script.value
+      && paragraphs.every((item) => (!item.style.trim() || directedAvailable) && matchReady(item.style, match))
     : Boolean(script.value.trim()) && (!directed || directedAvailable) && matchReady(scriptDirections.field.value, match);
   const needsTranscript = !directed && match === "maximum" && directedAvailable && state.voice && !state.voice.transcript;
   errorAt("engine-note", needsTranscript ? "Add the reference transcript under Voice reference to use maximum resemblance." : "");
-  const overridden = match === "maximum" && (prepared ? prepared.some((part) => part.instructions.trim()) : directed);
+  const overridden = match === "maximum" && (perParagraph ? paragraphs.some((item) => item.style.trim()) : directed);
   byId("engine-override").hidden = !overridden;
   byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready || !scriptAdvanced.valid();
 }
@@ -194,54 +230,6 @@ function instructionsEditor(id, value, readOnly = false) {
   return { box, field };
 }
 
-function renderPrepared() {
-  const container = byId("prepared-sections");
-  container.replaceChildren();
-  prepared.forEach((part, index) => {
-    const box = element("div", "section");
-    const title = element("strong", "", `Section ${index + 1}`);
-    const label = element("label", "", "Words to speak");
-    const field = element("textarea");
-    field.id = `prepared-text-${index}`;
-    field.rows = 3;
-    field.maxLength = chunkLimit;
-    field.value = part.text;
-    label.htmlFor = field.id;
-    const sounds = cuePicker(field, "script-error");
-    const directions = instructionsEditor(`prepared-instructions-${index}`, part.instructions);
-    const refreshControls = () => {
-      sounds.disabled = Boolean(directions.field.value.trim()) || scriptEngine.field.value === "maximum";
-      updateEditor();
-    };
-    field.addEventListener("input", () => { part.text = field.value; refreshControls(); });
-    directions.field.addEventListener("input", () => { part.instructions = directions.field.value; refreshControls(); });
-    const remove = element("button", "button button-quiet", "Remove section");
-    remove.type = "button";
-    remove.disabled = prepared.length === 1;
-    remove.addEventListener("click", () => {
-      if (!window.confirm("Remove this section from the draft?")) return;
-      prepared.splice(index, 1);
-      renderPrepared();
-      updateEditor();
-    });
-    box.append(title, label, field, sounds, directions.box, remove);
-    container.append(box);
-    refreshControls();
-  });
-}
-
-function setPrepared(value) {
-  prepared = value;
-  byId("prepared-editor").hidden = !value;
-  script.readOnly = Boolean(value);
-  byId("import-script").disabled = Boolean(value);
-  byId("prepare-sections").hidden = Boolean(value);
-  byId("script-cue").hidden = Boolean(value);
-  byId("script-instructions").hidden = Boolean(value);
-  if (value) renderPrepared();
-  updateEditor();
-}
-
 function renderVoice() {
   const signature = JSON.stringify([state.voice, state.voices, state.reference_notice]);
   if (signature === voiceSignature) return;
@@ -250,6 +238,8 @@ function renderVoice() {
   const audio = byId("voice-audio");
   const menu = byId("voice-selection");
   byId("voice-name").textContent = voice ? voice.label : "No voice reference yet";
+  byId("settings-voice").textContent = voice
+    ? `${voice.label}${voice.transcript ? " · transcript saved" : ""}` : "None yet. Add one under Voice and words.";
   byId("voice-duration").textContent = voice ? `${voice.duration.toFixed(1)} seconds · WAV` : "Add a recording of your voice to get started.";
   byId("saved-references").hidden = state.voices.length < 2;
   menu.replaceChildren(...state.voices.map((item) => new Option(item.label, item.id)));
@@ -348,6 +338,7 @@ function renderPronunciations() {
     return item;
   }));
   list.hidden = !words.length;
+  renderScriptWords();
 }
 
 async function savePronunciation() {
@@ -384,22 +375,246 @@ for (const id of ["pronunciation-written", "pronunciation-spoken"]) {
     if (event.key === "Enter") { event.preventDefault(); savePronunciation(); }
   });
 }
-byId("spoken-preview-button").addEventListener("click", async () => {
-  const output = byId("spoken-preview");
-  const text = prepared ? prepared.map((part) => part.text).join("\n\n") : script.value;
-  errorAt("pronunciation-error");
-  if (!text.trim()) {
-    errorAt("pronunciation-error", "Enter a script to preview.");
+// ---- Script step: edit or preview the spoken words, and pronunciations ----
+
+function setScriptMode(mode) {
+  scriptMode = mode;
+  byId("script-edit").hidden = mode !== "edit";
+  byId("spoken-view").hidden = mode !== "preview";
+  byId("mode-edit").setAttribute("aria-pressed", String(mode === "edit"));
+  byId("mode-preview").setAttribute("aria-pressed", String(mode === "preview"));
+  byId("import-script").disabled = mode !== "edit";
+  if (mode === "preview") loadSpoken();
+  else script.focus();
+}
+
+async function loadSpoken() {
+  const output = byId("spoken-text");
+  errorAt("word-error");
+  if (!script.value.trim()) {
+    output.replaceChildren(element("p", "muted", "Write or import a script to preview how it will be spoken."));
     return;
   }
+  const version = ++spokenRequest;
   try {
-    const result = await change("/api/spoken-preview", { value: { script: text } });
-    output.textContent = result.spoken;
-    output.hidden = false;
+    const result = await change("/api/spoken-preview", { value: { script: script.value } });
+    if (version !== spokenRequest) return;
+    renderSpoken(result.paragraphs || []);
   } catch (error) {
-    errorAt("pronunciation-error", error.message);
+    errorAt("word-error", error.message);
+  }
+}
+
+function wordButton(label, written, className = "word") {
+  const button = element("button", className, label);
+  button.type = "button";
+  button.addEventListener("click", () => fillWord(written));
+  return button;
+}
+
+function renderSpoken(paragraphs) {
+  const output = byId("spoken-text");
+  output.replaceChildren(...paragraphs.map((segments) => {
+    const paragraph = element("p");
+    segments.forEach((segment, index) => {
+      if (index) paragraph.append(" ");
+      if (segment.spoken === undefined) {
+        // Words read as written: each one can be selected to set a pronunciation.
+        segment.text.split(" ").forEach((word, position) => {
+          if (position) paragraph.append(" ");
+          if (/^\[[^\]]*\]$/.test(word) || !/[A-Za-z]/.test(word)) paragraph.append(word);
+          else paragraph.append(wordButton(word, word));
+        });
+        return;
+      }
+      const changed = wordButton(segment.spoken || "(silent)", segment.text, `word changed ${segment.kind}`);
+      changed.dataset.written = segment.text;
+      changed.setAttribute("aria-label", `${segment.spoken}, written as ${segment.text}`);
+      changed.title = `Written: ${segment.text}`;
+      paragraph.append(changed);
+    });
+    return paragraph;
+  }));
+}
+
+function cleanWord(word) {
+  return word.replace(/^[^\w]+|[^\w]+$/g, "");
+}
+
+function fillWord(written) {
+  // Offer the first word of a selection; existing pronunciations open for editing.
+  const word = cleanWord(written.split(" ").find((part) => /[A-Za-z]/.test(part)) || written);
+  const saved = (state.pronunciations || []).find((item) => item.written.toLowerCase() === word.toLowerCase());
+  byId("word-written").value = saved ? saved.written : word;
+  byId("word-spoken").value = saved ? saved.spoken : "";
+  byId("word-spoken").focus();
+  byId("script-words-box").scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function wordsInScript() {
+  const text = script.value.toLowerCase();
+  return (state.pronunciations || []).filter((item) => {
+    const escaped = item.written.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`(^|[^\\w])${escaped}([^\\w]|$)`).test(text);
+  });
+}
+
+function renderScriptWords() {
+  const list = byId("script-words");
+  const words = wordsInScript();
+  list.replaceChildren(...words.map((word) => {
+    const item = element("li", "word-chip");
+    const edit = element("button", "chip-label", `${word.written} → ${word.spoken}`);
+    edit.type = "button";
+    edit.title = "Edit this pronunciation";
+    edit.addEventListener("click", () => fillWord(word.written));
+    const remove = element("button", "chip-remove", "×");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove pronunciation for ${word.written}`);
+    remove.addEventListener("click", () => deleteWord(word, "word-error"));
+    item.append(edit, remove);
+    return item;
+  }));
+  list.hidden = !words.length;
+}
+
+async function saveWord(written, spoken, errorId) {
+  if (!written.trim() || !spoken.trim()) {
+    errorAt(errorId, "Enter the word as written and how to say it.");
+    return false;
+  }
+  errorAt(errorId);
+  try {
+    const word = await change("/api/pronunciations", { value: { written, spoken } });
+    state.pronunciations = [...(state.pronunciations || []).filter((item) => item.id !== word.id), word]
+      .sort((a, b) => a.written.localeCompare(b.written, undefined, { sensitivity: "base" }));
+    pronunciationsChanged();
+    return true;
+  } catch (error) {
+    errorAt(errorId, error.message);
+    return false;
+  }
+}
+
+async function deleteWord(word, errorId) {
+  errorAt(errorId);
+  try {
+    await change(`/api/pronunciations/${word.id}`, { method: "DELETE" });
+    state.pronunciations = (state.pronunciations || []).filter((item) => item.id !== word.id);
+    pronunciationsChanged();
+  } catch (error) {
+    errorAt(errorId, error.message);
+  }
+}
+
+function pronunciationsChanged() {
+  pronunciationSignature = "";
+  renderPronunciations();
+  renderScriptWords();
+  if (scriptMode === "preview") loadSpoken();
+  jobSignature = "";
+  refreshJob();
+}
+
+byId("mode-edit").addEventListener("click", () => setScriptMode("edit"));
+byId("mode-preview").addEventListener("click", () => setScriptMode("preview"));
+byId("word-save").addEventListener("click", async () => {
+  if (await saveWord(byId("word-written").value, byId("word-spoken").value, "word-error")) {
+    byId("word-written").value = "";
+    byId("word-spoken").value = "";
   }
 });
+for (const id of ["word-written", "word-spoken"]) {
+  byId(id).addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); byId("word-save").click(); }
+  });
+}
+
+// ---- Settings step: one delivery style, or one per paragraph ----
+
+const styleExamples = [...byId("delivery-instructions").content.querySelectorAll("select option")]
+  .filter((option) => option.value).map((option) => ({ value: option.value, label: option.textContent }));
+
+function setStyleMode(mode) {
+  styleMode = mode;
+  byId("style-whole").setAttribute("aria-pressed", String(mode === "whole"));
+  byId("style-paragraphs").setAttribute("aria-pressed", String(mode === "paragraphs"));
+  byId("script-instructions").hidden = mode !== "whole";
+  byId("paragraph-styles").hidden = mode !== "paragraphs";
+  if (mode === "paragraphs") refreshParagraphs();
+  updateEditor();
+}
+
+async function refreshParagraphs() {
+  if (paragraphsFor === script.value) return renderParagraphStyles();
+  const text = script.value;
+  if (!text.trim()) {
+    paragraphs = [];
+    paragraphsFor = text;
+    return renderParagraphStyles();
+  }
+  try {
+    const result = await change("/api/sections/preview", { value: { script: text } });
+    const previous = new Map(paragraphs.map((item) => [item.text, item.style]));
+    const grouped = [];
+    let current = [];
+    result.sections.forEach((sectionText, index) => {
+      const pause = result.pauses?.[index];
+      current.push({ text: sectionText, pause_ms: pause });
+      if (pause === undefined || pause >= 750 || index === result.sections.length - 1) {
+        grouped.push(current);
+        current = [];
+      }
+    });
+    paragraphs = grouped.map((sections) => {
+      const joined = sections.map((item) => item.text).join(" ");
+      return { text: joined, sections, style: previous.get(joined) ?? "" };
+    });
+    paragraphsFor = text;
+    renderParagraphStyles();
+  } catch (error) {
+    errorAt("script-error", error.message);
+  }
+}
+
+function renderParagraphStyles() {
+  const list = byId("paragraph-styles");
+  if (!paragraphs.length) {
+    list.replaceChildren(element("li", "muted", "Write a script in step 1 to choose a style per paragraph."));
+    updateEditor();
+    return;
+  }
+  list.replaceChildren(...paragraphs.map((item, index) => {
+    const row = element("li", "paragraph-style");
+    row.append(element("span", "row-number", String(index + 1)), element("span", "row-text", item.text));
+    const select = element("select");
+    select.setAttribute("aria-label", `Delivery style for paragraph ${index + 1}`);
+    const custom = item.style && !styleExamples.some((example) => example.value === item.style);
+    select.append(new Option("Default", ""), ...styleExamples.map((example) => new Option(example.label, example.value)),
+      new Option("Custom…", "__custom"));
+    select.value = custom ? "__custom" : item.style;
+    const input = element("input");
+    input.type = "text";
+    input.maxLength = 240;
+    input.placeholder = "Describe the delivery, like calm and reassuring";
+    input.setAttribute("aria-label", `Custom delivery style for paragraph ${index + 1}`);
+    input.value = custom ? item.style : "";
+    input.hidden = !custom;
+    select.addEventListener("change", () => {
+      input.hidden = select.value !== "__custom";
+      item.style = select.value === "__custom" ? input.value : select.value;
+      if (!input.hidden) input.focus();
+      updateEditor();
+    });
+    input.addEventListener("input", () => { item.style = input.value; updateEditor(); });
+    row.append(select, input);
+    return row;
+  }));
+  updateEditor();
+}
+
+byId("style-whole").addEventListener("click", () => setStyleMode("whole"));
+byId("style-paragraphs").addEventListener("click", () => setStyleMode("paragraphs"));
 
 function invalidateMix() {
   mixRevision++;
@@ -544,7 +759,7 @@ function renderHistory() {
     badge(status, entry.status);
     open.append(element("span", "history-name", entry.title), status);
     row.append(open);
-    const remove = element("button", "button button-quiet remove-job", "Delete");
+    const remove = element("button", "button button-quiet remove-job", "×");
     remove.type = "button";
     remove.setAttribute("aria-label", `Delete ${entry.title}`);
     remove.disabled = ["queued", "running"].includes(entry.status);
@@ -668,163 +883,271 @@ function checkSummary(check) {
   return { className: "check-review", text: `Needs review: ${(check.reasons || []).join("; ")} · Heard: \u201c${check.heard || ""}\u201d` };
 }
 
+function sectionState(section) {
+  if (section.pending) return "pending";
+  if (!section.check) return "unchecked";
+  return section.check.status === "pass" ? "pass" : "review";
+}
+
+const stateLabels = { pass: "Check passed", review: "Needs review", pending: "Pending", unchecked: "Not checked" };
+let playingButton = null;
+
+function playSection(entry, section, button) {
+  // One shared player for quick listening from the list; the editor has full controls.
+  const player = byId("section-player");
+  const source = `/api/jobs/${entry.id}/sections/${section.number}/audio?v=${section.audio}`;
+  const restart = player.dataset.source !== source || player.paused;
+  player.pause();
+  if (playingButton) { playingButton.textContent = "▶"; playingButton.setAttribute("aria-label", playingButton.dataset.label); }
+  playingButton = null;
+  if (!restart) return;
+  player.dataset.source = source;
+  player.src = source;
+  playingButton = button;
+  button.textContent = "■";
+  button.setAttribute("aria-label", `Stop section ${section.number}`);
+  player.play().catch(() => {});
+}
+
+byId("section-player").addEventListener("ended", () => {
+  if (playingButton) { playingButton.textContent = "▶"; playingButton.setAttribute("aria-label", playingButton.dataset.label); }
+  playingButton = null;
+});
+
+function selectSection(entry, number) {
+  sectionSelection.set(entry.id, number);
+  renderSections(entry);
+}
+
 function renderSections(entry) {
-  const container = byId("sections");
-  const expanded = new Set([...container.querySelectorAll("details[open]")].map((node) => node.dataset.key));
+  const list = byId("sections");
+  const editor = byId("section-editor");
   byId("review").hidden = !entry;
   if (!entry) {
-    container.replaceChildren();
+    list.replaceChildren();
+    editor.replaceChildren();
     return;
   }
-  const sections = entry.sections.map((section, index) => {
-    const box = element("details", "section");
-    const key = `${entry.id}-${section.number}`;
-    box.dataset.key = key;
-    box.open = expanded.has(key);
-    const suffix = section.pending ? " · Pending" : "";
-    box.append(element("summary", "", `Section ${section.number}${suffix}`));
+  const states = new Map(entry.sections.map((section) => [section.number, sectionState(section)]));
+  const reviewCount = [...states.values()].filter((value) => value === "review").length;
+  if (!reviewCount && reviewFilter === "review") reviewFilter = "all";
+  byId("review-filter").replaceChildren(...[["all", `All · ${entry.sections.length}`], ["review", `Needs review · ${reviewCount}`]]
+    .filter(([value]) => value === "all" || reviewCount)
+    .map(([value, label]) => {
+      const chip = element("button", `chip${value === "review" ? " chip-review" : ""}`, label);
+      chip.type = "button";
+      chip.setAttribute("aria-pressed", String(reviewFilter === value));
+      chip.addEventListener("click", () => { reviewFilter = value; renderSections(entry); });
+      return chip;
+    }));
+
+  let selectedNumber = sectionSelection.get(entry.id);
+  if (!entry.sections.some((section) => section.number === selectedNumber)) {
+    // Start with the first section that needs attention.
+    selectedNumber = (entry.sections.find((section) => states.get(section.number) === "review") || entry.sections[0]).number;
+    sectionSelection.set(entry.id, selectedNumber);
+  }
+  const visible = entry.sections.filter((section) => reviewFilter === "all" || states.get(section.number) === "review");
+  list.replaceChildren(...visible.map((section) => {
+    const state = states.get(section.number);
+    const row = element("li", `section-row${section.number === selectedNumber ? " selected" : ""}`);
+    const open = element("button", "row-select");
+    open.type = "button";
+    open.setAttribute("aria-current", String(section.number === selectedNumber));
+    const dot = element("span", "state-dot");
+    dot.dataset.state = state;
+    dot.title = stateLabels[state];
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", stateLabels[state]);
+    open.append(dot, element("span", "row-number", String(section.number)), element("span", "row-text", section.text));
+    open.addEventListener("click", () => selectSection(entry, section.number));
+    row.append(open);
     if (section.audio) {
-      const audio = element("audio");
-      audio.controls = true;
-      audio.preload = "none";
-      audio.setAttribute("aria-label", `Section ${section.number} audio`);
-      audio.src = `/api/jobs/${entry.id}/sections/${section.number}/audio?v=${section.audio}`;
-      box.append(audio);
-      const details = section.generation || {};
-      const source = details.engine
-        ? [details.engine, details.device?.toUpperCase(), details.runtime].filter(Boolean).join(" · ")
-        : "Engine details unavailable";
-      const metadata = element("p", "muted section-metadata", `Voice reference: ${entry.voice_reference || "Unknown"} · ${source}`);
-      if (details.model_sha256) {
-        metadata.textContent += ` · Model ${details.model_sha256.slice(0, 12)}`;
-        metadata.title = `Primary model SHA-256: ${details.model_sha256}`;
-      }
-      box.append(metadata);
-      const summary = checkSummary(section.check);
-      if (summary) box.append(element("p", `check-result ${summary.className}`, summary.text));
+      const play = element("button", "row-play", "▶");
+      play.type = "button";
+      play.dataset.label = `Play section ${section.number}`;
+      play.setAttribute("aria-label", play.dataset.label);
+      play.addEventListener("click", () => playSection(entry, section, play));
+      row.append(play);
     }
-    // Pending sections preview the words the next take will use; finished ones show what their take used.
-    const shownSpoken = section.pending ? section.spoken : section.takes?.find((take) => take.current)?.spoken;
-    if (shownSpoken && shownSpoken !== section.text) {
-      box.append(element("p", "muted section-metadata", `${section.pending ? "Will be spoken as" : "Spoken as"}: ${shownSpoken}`));
-    }
-    const label = element("label", "", "Text to speak");
-    label.htmlFor = `section-text-${section.number}`;
-    const field = element("textarea");
-    field.id = label.htmlFor;
-    field.rows = 2;
-    field.maxLength = chunkLimit;
-    field.value = sectionDrafts.get(key) ?? section.text;
-    field.readOnly = entry.status !== "ready";
-    const redo = element("button", "button button-quiet", "Regenerate section");
-    redo.type = "button";
-    const sounds = cuePicker(field, "result-error");
-    const directions = instructionsEditor(`section-instructions-${section.number}`,
-      instructionDrafts.get(key) ?? section.instructions ?? "", field.readOnly);
-    const engine = voiceMatchEditor(`section-engine-${section.number}`,
-      matchDrafts.get(key) ?? section.voice_match, field.readOnly);
-    const advanced = advancedEditor(`section-advanced-${section.number}`,
-      turboDrafts.get(key) ?? { ...turboDefaults, ...(section.turbo_settings || {}), seed: 0 },
-      () => { turboDrafts.set(key, advanced.value()); updateActions(); }, field.readOnly);
-    const updateActions = () => {
-      const directed = Boolean(directions.field.value.trim());
-      const maximum = !directed && engine.field.value === "maximum";
-      sounds.disabled = field.readOnly || directed || maximum;
-      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
-        || (maximum && (!directedAvailable || !entry.voice_transcript_ready));
-      redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
-      overrideNote.hidden = !(directed && engine.field.value === "maximum");
-    };
-    const overrideNote = element("p", "muted instructions-hint",
-      "Special instructions take priority: this section uses VoxCPM2's directed mode without the reference transcript. Clear the instructions to use maximum resemblance.");
-    engine.field.addEventListener("change", () => {
-      matchDrafts.set(key, engine.field.value);
-      updateActions();
-    });
-    field.addEventListener("input", () => {
-      sectionDrafts.set(key, field.value);
-      updateActions();
-    });
-    directions.field.addEventListener("input", () => {
-      instructionDrafts.set(key, directions.field.value);
-      updateActions();
-    });
-    redo.addEventListener("click", async () => {
-      redo.disabled = true;
-      errorAt("result-error");
-      try {
-        await change(`/api/jobs/${entry.id}/sections/${section.number}`, {
-          value: { text: field.value, instructions: directions.field.value, turbo_settings: advanced.value(),
-            voice_match: engine.field.value },
-        });
-        sectionDrafts.delete(key);
-        instructionDrafts.delete(key);
-        turboDrafts.delete(key);
-        matchDrafts.delete(key);
-        await refreshJob();
-      } catch (error) {
-        errorAt("result-error", error.message);
-        updateActions();
-      }
-    });
-    const actions = element("div", "section-actions");
-    actions.append(sounds, redo);
-    updateActions();
-    box.append(label, field, engine.box, directions.box, overrideNote, advanced.box, actions);
-    if ((section.takes?.length || 0) > 1 || (section.pending && section.takes?.length)) {
-      const history = element("details", "take-history");
-      history.append(element("summary", "", `All takes (${section.takes.length})`));
-      section.takes.forEach((take, takeIndex) => {
-        const item = element("div", "take-item");
-        const selectedTake = take.current && !section.pending;
-        item.append(element("strong", "", selectedTake ? "Current take" : `Take ${section.takes.length - takeIndex}`));
-        const info = [take.engine, take.device?.toUpperCase()].filter(Boolean).join(" · ");
-        if (info) item.append(element("p", "muted", info));
-        item.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
-        if (take.spoken && take.spoken !== take.text) item.append(element("p", "muted", `Spoken as: ${take.spoken}`));
-        const takeCheck = checkSummary(take.check);
-        if (takeCheck) item.append(element("p", `check-result ${takeCheck.className}`, takeCheck.text));
-        if (take.instructions) item.append(element("p", "muted", `Instructions: ${take.instructions}`));
-        if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
-          const setting = take.turbo_settings;
-          item.append(element("p", "muted", `Seed ${take.seed} · Temperature ${setting.temperature} · Top P ${setting.top_p} · Top K ${setting.top_k} · Repetition ${setting.repetition_penalty} · Reference normalization ${setting.normalize_reference ? "on" : "off"}`));
-        }
-        const player = element("audio");
-        player.controls = true;
-        player.preload = "none";
-        player.setAttribute("aria-label", `Section ${section.number} take ${section.takes.length - takeIndex}`);
-        player.src = `/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/audio`;
-        item.append(player);
-        if (!selectedTake) {
-          const restore = element("button", "button button-quiet", "Use this take");
-          restore.type = "button";
-          restore.disabled = !take.can_restore || !["ready", "failed"].includes(entry.status);
-          if (!take.can_restore) restore.title = "The words for this older take are unknown.";
-          restore.addEventListener("click", async () => {
-            restore.disabled = true;
-            errorAt("result-error");
-            try {
-              await change(`/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/restore`);
-              sectionDrafts.delete(key);
-              instructionDrafts.delete(key);
-              turboDrafts.delete(key);
-              matchDrafts.delete(key);
-              await refreshJob();
-            } catch (error) {
-              errorAt("result-error", error.message);
-              restore.disabled = false;
-            }
-          });
-          item.append(restore);
-        }
-        history.append(item);
+    return row;
+  }));
+  const section = entry.sections.find((item) => item.number === selectedNumber);
+  editor.replaceChildren(...sectionEditor(entry, section, states.get(section.number)));
+}
+
+function sectionEditor(entry, section, state) {
+  const key = `${entry.id}-${section.number}`;
+  const nodes = [];
+  const heading = element("div", "editor-heading");
+  heading.append(element("h3", "", `Section ${section.number} of ${entry.sections.length}`));
+  const index = entry.sections.indexOf(section);
+  for (const [label, target] of [["Previous", entry.sections[index - 1]], ["Next", entry.sections[index + 1]]]) {
+    const move = element("button", "button button-quiet", label);
+    move.type = "button";
+    move.disabled = !target;
+    if (target) move.addEventListener("click", () => selectSection(entry, target.number));
+    heading.append(move);
+  }
+  nodes.push(heading);
+
+  if (section.audio) {
+    const audio = element("audio");
+    audio.controls = true;
+    audio.preload = "none";
+    audio.setAttribute("aria-label", `Section ${section.number} audio`);
+    audio.src = `/api/jobs/${entry.id}/sections/${section.number}/audio?v=${section.audio}`;
+    nodes.push(audio);
+    const summary = checkSummary(section.check);
+    if (summary) nodes.push(element("p", `check-result ${summary.className}`, summary.text));
+  } else {
+    nodes.push(element("p", "muted", state === "pending" ? "This section is waiting to be generated." : "No audio yet."));
+  }
+  const shownSpoken = section.pending ? section.spoken : section.takes?.find((take) => take.current)?.spoken;
+  if (shownSpoken && shownSpoken !== section.text) {
+    nodes.push(element("p", "muted section-metadata", `${section.pending ? "Will be spoken as" : "Spoken as"}: ${shownSpoken}`));
+  }
+
+  const label = element("label", "", "Text to speak");
+  label.htmlFor = `section-text-${section.number}`;
+  const field = element("textarea");
+  field.id = label.htmlFor;
+  field.rows = 3;
+  field.maxLength = chunkLimit;
+  field.value = sectionDrafts.get(key) ?? section.text;
+  field.readOnly = entry.status !== "ready";
+  const redo = element("button", "button button-primary", "Regenerate section");
+  redo.type = "button";
+  const sounds = cuePicker(field, "result-error");
+  const engine = voiceMatchEditor(`section-engine-${section.number}`, matchDrafts.get(key) ?? section.voice_match, field.readOnly);
+  const directions = instructionsEditor(`section-instructions-${section.number}`,
+    instructionDrafts.get(key) ?? section.instructions ?? "", field.readOnly);
+  const overrideNote = element("p", "muted override-note",
+    "A delivery style takes priority: this section uses VoxCPM2's directed mode without the reference transcript. Clear the style to use maximum resemblance.");
+  const advanced = advancedEditor(`section-advanced-${section.number}`,
+    turboDrafts.get(key) ?? { ...turboDefaults, ...(section.turbo_settings || {}), seed: 0 },
+    () => { turboDrafts.set(key, advanced.value()); updateActions(); }, field.readOnly);
+  const updateActions = () => {
+    const directed = Boolean(directions.field.value.trim());
+    const maximum = !directed && engine.field.value === "maximum";
+    sounds.disabled = field.readOnly || directed || maximum;
+    redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
+      || (maximum && (!directedAvailable || !entry.voice_transcript_ready));
+    redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
+    overrideNote.hidden = !(directed && engine.field.value === "maximum");
+  };
+  field.addEventListener("input", () => { sectionDrafts.set(key, field.value); updateActions(); });
+  directions.field.addEventListener("input", () => { instructionDrafts.set(key, directions.field.value); updateActions(); });
+  engine.field.addEventListener("change", () => { matchDrafts.set(key, engine.field.value); updateActions(); });
+  redo.addEventListener("click", async () => {
+    redo.disabled = true;
+    errorAt("result-error");
+    try {
+      await change(`/api/jobs/${entry.id}/sections/${section.number}`, {
+        value: { text: field.value, instructions: directions.field.value, turbo_settings: advanced.value(),
+          voice_match: engine.field.value },
       });
-      box.append(history);
+      for (const drafts of [sectionDrafts, instructionDrafts, turboDrafts, matchDrafts]) drafts.delete(key);
+      await refreshJob();
+    } catch (error) {
+      errorAt("result-error", error.message);
+      updateActions();
     }
-    if (index + 1 < entry.sections.length) box.append(pauseEditor(entry, section, key));
-    return box;
   });
-  container.replaceChildren(...sections);
+  const actions = element("div", "section-actions");
+  actions.append(sounds, redo);
+  nodes.push(label, field, engine.box, directions.box, overrideNote, actions);
+  updateActions();
+
+  // With a single take, the check result and words above already describe it.
+  if (section.takes?.length > 1 || (section.pending && section.takes?.length)) nodes.push(takeChooser(entry, section, key));
+
+  const more = element("details", "more-options");
+  more.open = openMore.has(key);
+  more.addEventListener("toggle", () => { if (more.open) openMore.add(key); else openMore.delete(key); });
+  more.append(element("summary", "", "More options"));
+  const details = section.generation || {};
+  if (section.audio) {
+    const source = details.engine
+      ? [details.engine, details.device?.toUpperCase(), details.runtime].filter(Boolean).join(" · ")
+      : "Engine details unavailable";
+    const metadata = element("p", "muted section-metadata", `Voice reference: ${entry.voice_reference || "Unknown"} · ${source}`);
+    if (details.model_sha256) {
+      metadata.textContent += ` · Model ${details.model_sha256.slice(0, 12)}`;
+      metadata.title = `Primary model SHA-256: ${details.model_sha256}`;
+    }
+    more.append(metadata);
+  }
+  if (index + 1 < entry.sections.length) more.append(pauseEditor(entry, section, key));
+  more.append(advanced.box);
+  nodes.push(more);
+  return nodes;
+}
+
+function takeChooser(entry, section, key) {
+  // Takes as small tabs; the chosen tab shows its words, check result and a restore button.
+  const box = element("div", "takes");
+  box.append(element("label", "", `Takes · ${section.takes.length}`));
+  const tabs = element("div", "take-tabs");
+  const detail = element("div", "take-detail");
+  const currentId = section.takes.find((take) => take.current)?.id;
+  let shown = takeSelection.get(key) ?? currentId ?? section.takes[0].id;
+  if (!section.takes.some((take) => take.id === shown)) shown = section.takes[0].id;
+  const show = (takeId) => {
+    takeSelection.set(key, takeId);
+    for (const tab of tabs.children) tab.setAttribute("aria-pressed", String(tab.dataset.take === takeId));
+    const takeIndex = section.takes.findIndex((take) => take.id === takeId);
+    const take = section.takes[takeIndex];
+    const selectedTake = take.current && !section.pending;
+    detail.replaceChildren();
+    const info = [selectedTake ? "Current take" : `Take ${section.takes.length - takeIndex}`, take.engine, take.device?.toUpperCase()]
+      .filter(Boolean).join(" · ");
+    detail.append(element("p", "muted", info));
+    const player = element("audio");
+    player.controls = true;
+    player.preload = "none";
+    player.setAttribute("aria-label", `Section ${section.number} take ${section.takes.length - takeIndex}`);
+    player.src = `/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/audio`;
+    detail.append(player);
+    const takeCheck = checkSummary(take.check);
+    if (takeCheck) detail.append(element("p", `check-result ${takeCheck.className}`, takeCheck.text));
+    detail.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
+    if (take.instructions) detail.append(element("p", "muted", `Instructions: ${take.instructions}`));
+    if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
+      const setting = take.turbo_settings;
+      detail.append(element("p", "muted", `Seed ${take.seed} · Temperature ${setting.temperature} · Top P ${setting.top_p} · Top K ${setting.top_k} · Repetition ${setting.repetition_penalty} · Reference normalization ${setting.normalize_reference ? "on" : "off"}`));
+    }
+    if (!selectedTake) {
+      const restore = element("button", "button button-quiet", "Use this take");
+      restore.type = "button";
+      restore.disabled = !take.can_restore || !["ready", "failed"].includes(entry.status);
+      if (!take.can_restore) restore.title = "The words for this older take are unknown.";
+      restore.addEventListener("click", async () => {
+        restore.disabled = true;
+        errorAt("result-error");
+        try {
+          await change(`/api/jobs/${entry.id}/sections/${section.number}/takes/${take.id}/restore`);
+          for (const drafts of [sectionDrafts, instructionDrafts, turboDrafts, matchDrafts, takeSelection]) drafts.delete(key);
+          await refreshJob();
+        } catch (error) {
+          errorAt("result-error", error.message);
+          restore.disabled = false;
+        }
+      });
+      detail.append(restore);
+    }
+  };
+  section.takes.forEach((take, takeIndex) => {
+    const status = take.check ? (take.check.status === "pass" ? " · passed" : " · review") : "";
+    const tab = element("button", "take-tab", `${take.current && !section.pending ? "Current" : `Take ${section.takes.length - takeIndex}`}${status}`);
+    tab.type = "button";
+    tab.dataset.take = take.id;
+    tab.addEventListener("click", () => show(take.id));
+    tabs.append(tab);
+  });
+  box.append(tabs, detail);
+  show(shown);
+  return box;
 }
 
 function renderJob(entry) {
@@ -836,6 +1159,7 @@ function renderJob(entry) {
   byId("balance").hidden = entry?.status !== "ready" || !entry?.export;
   byId("balance").disabled = false;
   byId("check-recording").hidden = !(entry?.checks_available && entry?.status === "ready");
+  byId("reuse-script").hidden = !entry;
   byId("check-recording").disabled = false;
   errorAt("result-error", entry?.error);
   if (!entry) {
@@ -907,6 +1231,8 @@ async function refresh() {
     renderPronunciations();
     const pending = state.jobs.filter((row) => ["queued", "running"].includes(row.status)).length;
     byId("queue-note").textContent = pending ? `${pending} ${pending === 1 ? "recording" : "recordings"} in progress` : "";
+    byId("nav-queue").textContent = pending ? `${pending} in progress` : "";
+    byId("nav-queue").hidden = !pending;
     updateEditor();
     if (initialLoad && !selected) await selectJob(state.jobs[0]?.id ?? null);
     else await refreshJob();
@@ -930,54 +1256,47 @@ engineNote.id = "engine-note";
 engineNote.hidden = true;
 scriptEngine.box.append(engineNote);
 const engineOverride = element("p", "muted instructions-hint",
-  "Sections with special instructions use VoxCPM2's directed mode instead, without the reference transcript.");
+  "Sections with a delivery style use VoxCPM2's directed mode instead, without the reference transcript.");
 engineOverride.id = "engine-override";
 engineOverride.hidden = true;
 scriptEngine.box.append(engineOverride);
 byId("script-instructions").append(scriptDirections.box);
 byId("script-advanced").append(scriptAdvanced.box);
 
-script.addEventListener("input", updateEditor);
+let wordsTimer = null;
+script.addEventListener("input", () => {
+  updateEditor();
+  window.clearTimeout(wordsTimer);
+  wordsTimer = window.setTimeout(renderScriptWords, 300);
+});
 scriptDirections.field.addEventListener("input", updateEditor);
 scriptEngine.field.addEventListener("change", () => {
-  if (prepared) renderPrepared();
+  if (styleMode === "paragraphs") renderParagraphStyles();
   updateEditor();
-});
-byId("prepare-sections").addEventListener("click", async () => {
-  errorAt("script-error");
-  try {
-    const result = await change("/api/sections/preview", { value: { script: script.value } });
-    setPrepared(result.sections.map((text, index) => ({ text, instructions: scriptDirections.field.value, pause_ms: result.pauses?.[index] })));
-  } catch (error) {
-    errorAt("script-error", error.message);
-  }
-});
-byId("add-section").addEventListener("click", () => {
-  prepared.push({ text: "", instructions: "" });
-  renderPrepared();
-  byId(`prepared-text-${prepared.length - 1}`).focus();
-});
-byId("back-to-script").addEventListener("click", () => {
-  if (prepared.some((part) => part.instructions.trim()) && !window.confirm("Return to the script editor? Per-section instructions will be cleared.")) return;
-  script.value = prepared.map((part) => part.text).join("\n\n");
-  scriptDirections.field.value = "";
-  setPrepared(null);
 });
 byId("script-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (currentStep === 1) {
+    setStep(2);
+    return;
+  }
   if (submitting) return;
   submitting = true;
   updateEditor();
   errorAt("script-error");
   try {
     const created = await change("/api/jobs", {
-      value: prepared
-        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared,
+      value: styleMode === "paragraphs"
+        ? { title: byId("recording-title").value, script: script.value,
+            sections: paragraphs.flatMap((item) => item.sections.map((part) => ({ text: part.text, instructions: item.style.trim(), pause_ms: part.pause_ms }))),
             turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) }
         : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value,
             turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) },
     });
+    sectionSelection.delete(created.id);
+    reviewFilter = "all";
     await selectJob(created.id);
+    showView("recordings");
     await refresh();
   } catch (error) {
     errorAt("script-error", error.message);
@@ -1007,7 +1326,7 @@ byId("script-file").addEventListener("change", async (event) => {
     if (!imported || imported.length > scriptLimit) {
       throw new Error(`Use a script of 1 to ${scriptLimit.toLocaleString()} characters.`);
     }
-    if (script.value !== original || prepared) {
+    if (script.value !== original) {
       throw new Error("The draft changed during import. Your draft was kept. Import the file again when ready.");
     }
     script.value = imported;
@@ -1021,7 +1340,7 @@ byId("script-file").addEventListener("change", async (event) => {
   } catch (error) {
     errorAt("script-error", error.message);
   } finally {
-    button.disabled = Boolean(prepared);
+    button.disabled = scriptMode !== "edit";
   }
 });
 
@@ -1084,17 +1403,44 @@ byId("balance").addEventListener("click", async (event) => {
 
 byId("reuse-script").addEventListener("click", () => {
   if (!job) return;
-  if (prepared && !window.confirm("Replace the section draft with this recording's script?")) return;
-  setPrepared(null);
+  setStyleMode("whole");
+  setScriptMode("edit");
   byId("recording-title").value = job.title;
   byId("imported-file").textContent = "";
   byId("import-notice").hidden = true;
   script.value = job.script;
   scriptDirections.field.value = job.instructions ?? "";
-  updateEditor();
+  showView("create");
+  setStep(1);
   script.focus();
 });
 
-updateEditor();
+for (const link of document.querySelectorAll("[data-view]")) {
+  link.addEventListener("click", () => showView(link.dataset.view));
+}
+for (const button of document.querySelectorAll(".step")) {
+  button.addEventListener("click", () => {
+    const step = Number(button.dataset.step);
+    if (step === 3) showView("recordings");
+    else setStep(step);
+  });
+}
+byId("to-settings").addEventListener("click", () => setStep(2));
+byId("back-to-step-1").addEventListener("click", () => setStep(1));
+window.addEventListener("hashchange", () => showView(location.hash.slice(1), { remember: false }));
+
+// First visit: a short welcome that points to the guide. Browser storage may be unavailable.
+try {
+  byId("welcome").hidden = localStorage.getItem("studio-welcome-dismissed") === "1";
+} catch (error) {
+  byId("welcome").hidden = false;
+}
+byId("welcome-dismiss").addEventListener("click", () => {
+  byId("welcome").hidden = true;
+  try { localStorage.setItem("studio-welcome-dismissed", "1"); } catch (error) { /* Session only. */ }
+});
+
+showView(location.hash.slice(1) || "create", { remember: false });
+setStep(1);
 refresh();
 window.setInterval(refresh, 1600);

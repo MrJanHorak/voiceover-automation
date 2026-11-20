@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 
-from studio.quality import assess, score
+from studio.quality import assess, expected_text, score
 from studio.store import Store, StudioError
 
 EXPECTED = "The Pro plan costs $1,299.99, about 40% less than last year, and the Basic plan is just $19."
@@ -28,12 +28,26 @@ class AssessTests(unittest.TestCase):
     def test_skipped_words_low_voice_match_and_pace(self):
         skipped = assess(EXPECTED, "The Pro plan costs $1,299.99, and the Basic plan is just $19.", 10.7, 0.8)
         self.assertIn("starting near", skipped["reasons"][0])
-        self.assertIn("Voice match is low", assess("Hello there friend.", "Hello there friend.", 1.2, 0.4)["reasons"][0])
+        self.assertIn("Voice match is low", assess("Hello there my good friend, how are you.", "Hello there my good friend, how are you.", 3.5, 0.4)["reasons"][0])
         self.assertIn("Unusual pace", assess(EXPECTED, EXPECTED, 2.0, 0.8)["reasons"][0])
 
     def test_sound_cues_and_fillers(self):
         self.assertEqual(assess("Wait [laugh] for it, please now.", "Wait for it, please now.", 2.0)["status"], "pass")
         self.assertEqual(assess(EXPECTED, "Um, " + EXPECTED, 10.7)["status"], "pass")
+
+    def test_pronunciation_words_match_whatever_is_heard(self):
+        # 2026-11-20: "Nuvexa" (said as "noovexuhh") was heard as "new VEXA" and wrongly failed.
+        expected = expected_text("Welcome to the Nuvexa spring update. I'm glad you're here.", [("Nuvexa", "nooVEXuhh")])
+        for heard in ("Welcome to the new VEXA Spring Update. I'm glad you're here.",
+                      "Welcome to the new Vex of Spring update. I'm glad you're here.",
+                      "Welcome to the Nuvexa spring update. I'm glad you're here."):
+            self.assertEqual(assess(expected, heard, 3.0, 0.95)["status"], "pass", heard)
+        self.assertEqual(assess(expected, "Welcome to the new VEXA. I'm glad.", 3.0, 0.95)["status"], "review")
+
+    def test_voice_match_ignored_for_short_clips(self):
+        # A good 2-second take scored 0.59; longer good takes scored 0.94-0.98.
+        self.assertEqual(assess("Short and sweet. That's the goal.", "Short and sweet. That's the goal.", 2.0, 0.59)["status"], "pass")
+        self.assertEqual(assess(EXPECTED, EXPECTED, 10.7, 0.7)["status"], "review")
 
     def test_score_prefers_passing_then_fewer_errors_then_closer_voice(self):
         results = [{"status": "review", "word_error": 0.1, "similarity": 0.9},

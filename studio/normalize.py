@@ -177,8 +177,25 @@ def _scale(match):
     return values
 
 
+def speakable(spelling):
+    """Make a respelling easy for a voice model to read as one word.
+
+    "noo-VEX-uh" is joined into "noovexuh": models read hyphens as pauses or say "dash", and
+    capital letters inside a word ("nooVEXuh") can be spelled out letter by letter. Spaced
+    letters such as "A W S" and all-capital acronyms are left as written.
+    """
+    def fix(match):
+        word = match.group(0)
+        if "-" in word or (re.search(r"[a-z]", word) and re.search(r"[A-Z]{2,}", word)):
+            return word.replace("-", "").lower()
+        return word
+
+    return re.sub(r"[A-Za-z]+(?:-[A-Za-z]+)*", fix, spelling)
+
+
 def apply_pronunciations(text, pronunciations):
     """Replace whole words or phrases from the owner's list, longest entries first."""
+    pronunciations = [(written, speakable(spoken)) for written, spoken in pronunciations]
     for written, spoken in sorted(pronunciations, key=lambda item: -len(item[0])):
         pattern = r"(?<![\w])" + re.escape(written) + r"(?![\w])"
         text = re.sub(pattern, lambda _match, spoken=spoken: spoken, text, flags=re.IGNORECASE)
@@ -191,3 +208,34 @@ def spoken_text(text, pronunciations=()):
     for index in range(0, len(parts), 2):
         parts[index] = normalize_plain(apply_pronunciations(parts[index], pronunciations))
     return " ".join("".join(parts).split())
+
+
+def spoken_paragraphs(text, pronunciations=()):
+    """Paragraphs of the script with each changed stretch of words marked, for the preview.
+
+    Each paragraph is a list of segments: {"text": written} for words read as written, or
+    {"text": written, "spoken": spoken, "kind": "pronunciation" | "auto"} where the voice
+    will say something different. Words are aligned with difflib, so a change such as
+    "Jan. 5" -> "January fifth" is one segment.
+    """
+    from difflib import SequenceMatcher
+
+    keys = [written.lower() for written, _spoken in pronunciations]
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", text or ""):
+        written = paragraph.split()
+        if not written:
+            continue
+        spoken = spoken_text(paragraph, pronunciations).split()
+        segments = []
+        matcher = SequenceMatcher(a=written, b=spoken, autojunk=False)
+        for operation, a1, a2, b1, b2 in matcher.get_opcodes():
+            before, after = " ".join(written[a1:a2]), " ".join(spoken[b1:b2])
+            if operation == "equal":
+                segments.append({"text": before})
+                continue
+            lowered = re.sub(r"[^\w\s'-]", " ", before.lower())
+            listed = any(re.search(rf"(?<!\w){re.escape(key)}(?!\w)", lowered) for key in keys)
+            segments.append({"text": before, "spoken": after, "kind": "pronunciation" if listed else "auto"})
+        paragraphs.append(segments)
+    return paragraphs

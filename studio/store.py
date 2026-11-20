@@ -47,11 +47,11 @@ def now():
 
 def validate_directions(text, instructions, available):
     if instructions and not available:
-        raise StudioError("Special instructions need the local VoxCPM2 setup described in the README.", 409)
+        raise StudioError("Delivery styles need the local VoxCPM2 setup described in the README.", 409)
     if instructions and not instructions.replace("(", "").replace(")", "").strip():
         raise StudioError("Enter a description of the delivery you want.")
     if instructions and TURBO_SOUND_CUE.search(text):
-        raise StudioError("Remove bracketed sound or delivery cues from the script when using Special instructions.")
+        raise StudioError("Remove bracketed sound or delivery cues from the script when using a delivery style.")
 
 
 # Abbreviations whose trailing period does not end a sentence.
