@@ -19,6 +19,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
+from .normalize import spoken_text
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 
@@ -38,6 +39,15 @@ class SectionInput(BaseModel):
     # Used only when preparing a new recording; regeneration keeps the section's saved pause.
     pause_ms: Annotated[int, Field(strict=True, ge=0, le=MAX_PAUSE_MS)] | None = None
     voice_match: VoiceMatch | None = None
+
+
+class PronunciationInput(BaseModel):
+    written: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+    spoken: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class LoudnessInput(BaseModel):
+    target: Literal[-14.0, -16.0, -23.0, -24.0] | None
 
 
 class TranscriptInput(BaseModel):
@@ -92,54 +102,61 @@ def render_job(store, engine, directed, stop, job_id):
     folder = store.recordings / job_id
     folder.mkdir(exist_ok=True)
     reference = store.voices / f"{job['voice_id']}.wav"
-    paths = []
-    for section in job["sections"]:
+    pairs = store.pronunciation_pairs() if hasattr(store, "pronunciation_pairs") else []
+    filenames = {section["number"]: section["audio"] for section in job["sections"]}
+    pending = [section for section in job["sections"] if section["pending"]]
+    if getattr(directed, "needs_exclusive_gpu", False):
+        # Render Chatterbox sections first so the shared 4 GB GPU switches engines only once.
+        pending.sort(key=lambda section: bool(section["instructions"]) or section.get("voice_match") == "maximum")
+    for section in pending:
         if stop.is_set():
             return
-        filename = section["audio"]
-        if section["pending"]:
-            filename = f"section-{section['number']}-{new_id()}.wav"
-            try:
-                arguments = (section["text"], reference, section["seed"], folder / filename)
-                matched = not section["instructions"] and section.get("voice_match") == "maximum"
-                if section["instructions"] or matched:
-                    if getattr(directed, "needs_exclusive_gpu", False):
-                        release = getattr(engine, "release", None)
-                        if release:
-                            release()
-                    if matched:
-                        directed.render_matched(*arguments, job.get("voice_transcript") or "")
-                    else:
-                        directed.render(*arguments, section["instructions"])
-                    rendered_by = directed
+        filename = f"section-{section['number']}-{new_id()}.wav"
+        try:
+            # Models receive normalized words; the section keeps the text as written.
+            spoken = spoken_text(section["text"], pairs)
+            arguments = (spoken, reference, section["seed"], folder / filename)
+            matched = not section["instructions"] and section.get("voice_match") == "maximum"
+            if section["instructions"] or matched:
+                if getattr(directed, "needs_exclusive_gpu", False):
+                    release = getattr(engine, "release", None)
+                    if release:
+                        release()
+                if matched:
+                    directed.render_matched(*arguments, job.get("voice_transcript") or "")
                 else:
-                    settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
-                    if settings is None:
-                        engine.render(*arguments)
-                    else:
-                        engine.render(*arguments, settings=settings)
-                    rendered_by = engine
-                details = None
-                if callable(getattr(rendered_by, "details", None)):
-                    try:
-                        details = rendered_by.details()
-                    except Exception as error:
-                        LOG.warning("Could not record model details (%s)", type(error).__name__)
-                if details and matched and details.get("engine"):
-                    details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
-                store.finish_section(job_id, section["number"], filename, details, section["seed"])
-            except Exception:
-                (folder / filename).unlink(missing_ok=True)
-                raise
-        paths.append((folder / filename, section["pause_ms"]))
+                    directed.render(*arguments, section["instructions"])
+                rendered_by = directed
+            else:
+                settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
+                if settings is None:
+                    engine.render(*arguments)
+                else:
+                    engine.render(*arguments, settings=settings)
+                rendered_by = engine
+            details = None
+            if callable(getattr(rendered_by, "details", None)):
+                try:
+                    details = rendered_by.details()
+                except Exception as error:
+                    LOG.warning("Could not record model details (%s)", type(error).__name__)
+            if details and matched and details.get("engine"):
+                details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
+            store.finish_section(job_id, section["number"], filename, details, section["seed"], spoken)
+        except Exception:
+            (folder / filename).unlink(missing_ok=True)
+            raise
+        filenames[section["number"]] = filename
+    paths = [(folder / filenames[section["number"]], section["pause_ms"]) for section in job["sections"]]
 
     if stop.is_set():
         return
     export = f"export-{new_id()}"
     wav, mp3 = folder / f"{export}.wav", folder / f"{export}.mp3"
     try:
-        export_audio(paths, wav, mp3, trim=bool(job.get("trim_edges")))
-        store.finish_job(job_id, export)
+        loudness = export_audio(paths, wav, mp3, trim=bool(job.get("trim_edges")),
+                                rate=job.get("master_rate") or 24000, loudness=job.get("loudness_target"))
+        store.finish_job(job_id, export, loudness)
     except Exception:
         wav.unlink(missing_ok=True)
         mp3.unlink(missing_ok=True)
@@ -315,6 +332,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     def saved_reference_audio(voice_id: UUID):
         return file_response(store.voices / f"{voice_id.hex}.wav", "audio/wav")
 
+    @app.post("/api/pronunciations", dependencies=mutations, status_code=201)
+    def save_pronunciation(data: PronunciationInput):
+        return store.save_pronunciation(data.written, data.spoken)
+
+    @app.delete("/api/pronunciations/{word_id}", dependencies=mutations, status_code=204)
+    def delete_pronunciation(word_id: UUID):
+        store.delete_pronunciation(word_id.hex)
+        return Response(status_code=204)
+
+    @app.post("/api/spoken-preview", dependencies=mutations)
+    def spoken_preview(data: PreviewInput):
+        return {"spoken": spoken_text(data.script, store.pronunciation_pairs())}
+
     @app.put("/api/voice/{voice_id}/transcript", dependencies=mutations)
     def save_transcript(voice_id: UUID, data: TranscriptInput):
         return store.set_transcript(voice_id.hex, " ".join(data.transcript.split()))
@@ -352,15 +382,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     @app.get("/api/jobs/{job_id}")
     def job_details(job_id: UUID):
         job = store.job(job_id.hex)
+        pairs = store.pronunciation_pairs()
         return {
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
             "voice_reference": job["voice_label"],
             "voice_transcript_ready": bool(job["voice_transcript"]),
+            "master_rate": job["master_rate"], "loudness_target": job["loudness_target"],
+            "export_loudness": json.loads(job["export_loudness"]) if job["export_loudness"] else None,
             "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms", "voice_match")},
+                          "spoken": spoken_text(section["text"], pairs),
                           "generation": {key: section[f"rendered_{key}"] for key in
                                          ("engine", "device", "runtime", "model_sha256", "seed", "at")},
                           "turbo_settings": json.loads(section["turbo_settings"]) if section["turbo_settings"] else None,
-                          "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at", "voice_match")},
+                          "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at", "voice_match", "spoken")},
                                      "seed": take["seed"],
                                      "turbo_settings": json.loads(take["turbo_settings"]) if take["turbo_settings"] else None,
                                      "current": take["audio"] == section["audio"],
@@ -383,6 +417,11 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     @app.post("/api/jobs/{job_id}/retry", dependencies=mutations, status_code=202)
     def retry(job_id: UUID):
         store.retry(job_id.hex)
+        return {"id": job_id.hex}
+
+    @app.put("/api/jobs/{job_id}/loudness", dependencies=mutations, status_code=202)
+    def update_loudness(job_id: UUID, data: LoudnessInput):
+        store.set_loudness(job_id.hex, None if data.target is None else float(data.target))
         return {"id": job_id.hex}
 
     @app.post("/api/jobs/{job_id}/balance", dependencies=mutations, status_code=202)

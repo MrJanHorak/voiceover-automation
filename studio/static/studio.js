@@ -28,6 +28,7 @@ const turboDrafts = new Map();
 const matchDrafts = new Map();
 let transcriptVoice = null;
 let transcriptDirty = false;
+let pronunciationSignature = "";
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
   repetition_penalty: 1.2, normalize_reference: true };
@@ -82,6 +83,8 @@ function updateEditor() {
     : Boolean(script.value.trim()) && (!directed || directedAvailable) && matchReady(scriptDirections.field.value, match);
   const needsTranscript = !directed && match === "maximum" && directedAvailable && state.voice && !state.voice.transcript;
   errorAt("engine-note", needsTranscript ? "Add the reference transcript under Voice reference to use maximum resemblance." : "");
+  const overridden = match === "maximum" && (prepared ? prepared.some((part) => part.instructions.trim()) : directed);
+  byId("engine-override").hidden = !overridden;
   byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready || !scriptAdvanced.valid();
 }
 
@@ -308,6 +311,96 @@ byId("save-transcript").addEventListener("click", async () => {
   }
 });
 
+function renderPronunciations() {
+  const words = state.pronunciations || [];
+  const signature = JSON.stringify(words);
+  if (signature === pronunciationSignature) return;
+  pronunciationSignature = signature;
+  const list = byId("pronunciation-list");
+  list.replaceChildren(...words.map((word) => {
+    const item = element("li");
+    item.append(element("span", "", `${word.written} → ${word.spoken}`));
+    const edit = element("button", "button button-quiet", "Edit");
+    edit.type = "button";
+    edit.addEventListener("click", () => {
+      byId("pronunciation-written").value = word.written;
+      byId("pronunciation-spoken").value = word.spoken;
+      byId("pronunciation-spoken").focus();
+    });
+    const remove = element("button", "button button-quiet", "Remove");
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove pronunciation for ${word.written}`);
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      errorAt("pronunciation-error");
+      try {
+        await change(`/api/pronunciations/${word.id}`, { method: "DELETE" });
+        state.pronunciations = (state.pronunciations || []).filter((item) => item.id !== word.id);
+        renderPronunciations();
+        jobSignature = "";
+        await refreshJob();
+      } catch (error) {
+        errorAt("pronunciation-error", error.message);
+        remove.disabled = false;
+      }
+    });
+    item.append(edit, remove);
+    return item;
+  }));
+  list.hidden = !words.length;
+}
+
+async function savePronunciation() {
+  const written = byId("pronunciation-written");
+  const spoken = byId("pronunciation-spoken");
+  if (!written.value.trim() || !spoken.value.trim()) {
+    errorAt("pronunciation-error", "Enter the written word and how to say it.");
+    return;
+  }
+  const button = byId("pronunciation-add");
+  button.disabled = true;
+  errorAt("pronunciation-error");
+  try {
+    const word = await change("/api/pronunciations", { value: { written: written.value, spoken: spoken.value } });
+    state.pronunciations = [...(state.pronunciations || []).filter((item) => item.id !== word.id), word]
+      .sort((a, b) => a.written.localeCompare(b.written, undefined, { sensitivity: "base" }));
+    written.value = "";
+    spoken.value = "";
+    renderPronunciations();
+    jobSignature = "";
+    await refreshJob();
+    written.focus();
+  } catch (error) {
+    errorAt("pronunciation-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+byId("pronunciation-add").addEventListener("click", savePronunciation);
+for (const id of ["pronunciation-written", "pronunciation-spoken"]) {
+  // These fields sit inside the script form; Enter saves the word instead of generating.
+  byId(id).addEventListener("keydown", (event) => {
+    if (event.key === "Enter") { event.preventDefault(); savePronunciation(); }
+  });
+}
+byId("spoken-preview-button").addEventListener("click", async () => {
+  const output = byId("spoken-preview");
+  const text = prepared ? prepared.map((part) => part.text).join("\n\n") : script.value;
+  errorAt("pronunciation-error");
+  if (!text.trim()) {
+    errorAt("pronunciation-error", "Enter a script to preview.");
+    return;
+  }
+  try {
+    const result = await change("/api/spoken-preview", { value: { script: text } });
+    output.textContent = result.spoken;
+    output.hidden = false;
+  } catch (error) {
+    errorAt("pronunciation-error", error.message);
+  }
+});
+
 function invalidateMix() {
   mixRevision++;
   byId("mix-result").hidden = true;
@@ -475,7 +568,37 @@ function renderHistory() {
   byId("history").replaceChildren(...items);
 }
 
+function updateLoudness(entry) {
+  const control = byId("loudness-control");
+  const select = byId("loudness-target");
+  control.hidden = !entry?.export;
+  if (!entry) return;
+  if (document.activeElement !== select) select.value = entry.loudness_target === null ? "" : String(entry.loudness_target);
+  select.disabled = entry.status !== "ready";
+  const measured = entry.export_loudness;
+  const rate = `${(entry.master_rate || 24000) / 1000} kHz master`;
+  const format = (value) => Number(value).toFixed(1).replace("-", "−");
+  byId("loudness-result").textContent = measured
+    ? `Exported at ${format(measured.integrated)} LUFS, true peak ${format(measured.true_peak)} dBTP · ${rate}`
+    : entry.loudness_target === null ? `No final loudness pass · ${rate}` : `Applies when the exports are rebuilt · ${rate}`;
+}
+
+byId("loudness-target").addEventListener("change", async (event) => {
+  if (!job) return;
+  const select = event.target;
+  select.disabled = true;
+  errorAt("result-error");
+  try {
+    await change(`/api/jobs/${job.id}/loudness`, { method: "PUT", value: { target: select.value === "" ? null : Number(select.value) } });
+    await refreshJob();
+  } catch (error) {
+    errorAt("result-error", error.message);
+    select.disabled = false;
+  }
+});
+
 function updateExport(entry) {
+  updateLoudness(entry);
   const wrapper = byId("export");
   const audio = byId("result-audio");
   const version = entry?.export ? `${entry.id}/${entry.export}` : "";
@@ -569,6 +692,11 @@ function renderSections(entry) {
       }
       box.append(metadata);
     }
+    // Pending sections preview the words the next take will use; finished ones show what their take used.
+    const shownSpoken = section.pending ? section.spoken : section.takes?.find((take) => take.current)?.spoken;
+    if (shownSpoken && shownSpoken !== section.text) {
+      box.append(element("p", "muted section-metadata", `${section.pending ? "Will be spoken as" : "Spoken as"}: ${shownSpoken}`));
+    }
     const label = element("label", "", "Text to speak");
     label.htmlFor = `section-text-${section.number}`;
     const field = element("textarea");
@@ -594,7 +722,10 @@ function renderSections(entry) {
       redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
         || (maximum && (!directedAvailable || !entry.voice_transcript_ready));
       redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
+      overrideNote.hidden = !(directed && engine.field.value === "maximum");
     };
+    const overrideNote = element("p", "muted instructions-hint",
+      "Special instructions take priority: this section uses VoxCPM2's directed mode without the reference transcript. Clear the instructions to use maximum resemblance.");
     engine.field.addEventListener("change", () => {
       matchDrafts.set(key, engine.field.value);
       updateActions();
@@ -628,7 +759,7 @@ function renderSections(entry) {
     const actions = element("div", "section-actions");
     actions.append(sounds, redo);
     updateActions();
-    box.append(label, field, engine.box, directions.box, advanced.box, actions);
+    box.append(label, field, engine.box, directions.box, overrideNote, advanced.box, actions);
     if ((section.takes?.length || 0) > 1 || (section.pending && section.takes?.length)) {
       const history = element("details", "take-history");
       history.append(element("summary", "", `All takes (${section.takes.length})`));
@@ -639,6 +770,7 @@ function renderSections(entry) {
         const info = [take.engine, take.device?.toUpperCase()].filter(Boolean).join(" · ");
         if (info) item.append(element("p", "muted", info));
         item.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
+        if (take.spoken && take.spoken !== take.text) item.append(element("p", "muted", `Spoken as: ${take.spoken}`));
         if (take.instructions) item.append(element("p", "muted", `Instructions: ${take.instructions}`));
         if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
           const setting = take.turbo_settings;
@@ -753,8 +885,9 @@ async function refresh() {
   try {
     const revision = voiceRevision;
     const snapshot = await request("/api/state");
-    state = revision === voiceRevision ? snapshot : { ...state, jobs: snapshot.jobs };
+    state = revision === voiceRevision ? snapshot : { ...state, jobs: snapshot.jobs, pronunciations: snapshot.pronunciations };
     renderVoice();
+    renderPronunciations();
     const pending = state.jobs.filter((row) => ["queued", "running"].includes(row.status)).length;
     byId("queue-note").textContent = pending ? `${pending} ${pending === 1 ? "recording" : "recordings"} in progress` : "";
     updateEditor();
@@ -779,6 +912,11 @@ const engineNote = element("p", "error");
 engineNote.id = "engine-note";
 engineNote.hidden = true;
 scriptEngine.box.append(engineNote);
+const engineOverride = element("p", "muted instructions-hint",
+  "Sections with special instructions use VoxCPM2's directed mode instead, without the reference transcript.");
+engineOverride.id = "engine-override";
+engineOverride.hidden = true;
+scriptEngine.box.append(engineOverride);
 byId("script-instructions").append(scriptDirections.box);
 byId("script-advanced").append(scriptAdvanced.box);
 

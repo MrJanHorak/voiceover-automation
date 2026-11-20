@@ -162,3 +162,10 @@ audio { width: 100%; height: 42px; display: block; margin: .7rem 0; }
   .panel { padding: 1rem; }
   .history-select { align-items: flex-start; flex-direction: column; gap: .4rem; }
 }
+
+.pronunciation-list { list-style: none; margin: .6rem 0; padding: 0; display: grid; gap: .35rem; }
+.pronunciation-list li { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.pronunciation-list li span { flex: 1; min-width: 12rem; }
+.pronunciation-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: .6rem; align-items: end; }
+@media (max-width: 640px) { .pronunciation-form { grid-template-columns: 1fr; } }
+.loudness-control { margin-top: .8rem; }

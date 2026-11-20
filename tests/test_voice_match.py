@@ -117,10 +117,10 @@ class VoiceMatchRoutingTests(unittest.TestCase):
                          "instructions": "", "voice_match": "standard", "turbo_settings": None, "pause_ms": 0},
                     ]}
 
-                def finish_section(self, job_id, number, filename, details, seed):
+                def finish_section(self, job_id, number, filename, details, seed, spoken=None):
                     finished[number] = details
 
-                def finish_job(self, job_id, export):
+                def finish_job(self, job_id, export, loudness=None):
                     pass
 
             class Turbo:

@@ -21,7 +21,8 @@ class LongWorkflowTests(unittest.TestCase):
             "Last: thank you for spending the evening with us. We hope to see you again at the next event.",
         ]
         script = "\n\n".join(paragraphs)
-        pause = 24000 * PARAGRAPH_PAUSE_MS // 1000
+        rate = 48000  # New recordings use a 48 kHz master; the fake sections are 24 kHz.
+        pause = rate * PARAGRAPH_PAUSE_MS // 1000
         headers = {"X-Studio-Request": "1"}
         with TemporaryDirectory(dir=".tools") as temporary:
             root = Path(temporary)
@@ -37,14 +38,14 @@ class LongWorkflowTests(unittest.TestCase):
                 downloads = {kind: client.get(route + "/export/" + kind).content for kind in ("wav", "mp3")}
                 self.assertGreater(len(downloads["mp3"]), 1000)
                 with wave.open(io.BytesIO(downloads["wav"]), "rb") as audio:
-                    self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, 24000))
-                    self.assertEqual(audio.getnframes(), 4 * 24000 + 3 * pause)
+                    self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, rate))
+                    self.assertAlmostEqual(audio.getnframes(), 4 * rate + 3 * pause, delta=rate // 100)
                     # Each synthetic section has a different frequency; confirm the export keeps their order.
                     for index, frequency in enumerate((280, 340, 400, 460)):
-                        audio.setpos(index * (24000 + pause))
-                        samples = audio.readframes(24000)
+                        audio.setpos(index * (rate + pause))
+                        samples = audio.readframes(rate)
                         import struct
-                        values = struct.unpack("<24000h", samples)
+                        values = struct.unpack(f"<{rate}h", samples)
                         crossings = sum(a <= 0 < b for a, b in zip(values, values[1:]))
                         self.assertAlmostEqual(crossings, frequency, delta=2)
                 audio_before = [section["audio"] for section in ready["sections"]]

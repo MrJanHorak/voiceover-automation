@@ -17,7 +17,12 @@ PARAGRAPH_PAUSE_MS = 750
 MAX_PAUSE_MS = 5000
 INSTRUCTIONS_LIMIT = 240
 TRANSCRIPT_LIMIT = 1000
+WRITTEN_LIMIT = 100
+SPOKEN_LIMIT = 200
 VOICE_MATCHES = ("standard", "maximum")
+MASTER_RATE = 48000
+DEFAULT_LOUDNESS = -16.0
+LOUDNESS_TARGETS = (-14.0, -16.0, -23.0, -24.0)
 ENGINE_VERSION = "Chatterbox Turbo 0.1.7 · 749d1c1"
 DIRECTED_VERSION = "VoxCPM2 2.0.3 · 7936080"
 TURBO_SOUND_CUE = re.compile(
@@ -100,6 +105,31 @@ def validate_voice_match(text, instructions, voice_match, available, transcript)
         raise StudioError("Remove bracketed sound cues when using maximum resemblance; they are read aloud by VoxCPM2.")
 
 
+CLAUSE_BREAK = re.compile(r"(?<=[,;:\u2014\u2013])\s+|\s+(?=[\u2014\u2013]\s)")
+
+
+def split_long_sentence(sentence, limit=None):
+    """Split an overlong sentence at clause punctuation, keeping the pieces balanced.
+
+    Falls back to the word boundary nearest the balanced point only when a clause has no
+    usable punctuation, so a phrase such as "click buy" is never cut in the middle.
+    """
+    limit = limit or CHUNK_LIMIT
+    if len(sentence) <= limit:
+        return [sentence]
+    pieces = -(-len(sentence) // limit)
+    target = len(sentence) / pieces
+    breaks = [match.end() for match in CLAUSE_BREAK.finditer(sentence) if match.end() <= limit]
+    breaks = [point for point in breaks if len(sentence) - point >= 1]
+    if not breaks:
+        breaks = [match.end() for match in re.finditer(r"\s+", sentence) if match.end() <= limit]
+    if not breaks:
+        return textwrap.wrap(sentence, width=limit, break_on_hyphens=False)
+    point = min(breaks, key=lambda position: abs(position - target))
+    first, rest = sentence[:point].rstrip(), sentence[point:].lstrip()
+    return [first, *split_long_sentence(rest, limit)]
+
+
 def split_script_with_pauses(script):
     """Split at paragraph and sentence ends, returning (text, pause after it in ms) pairs."""
     chunks = []
@@ -112,9 +142,7 @@ def split_script_with_pauses(script):
                 continue
             if current:
                 chunks.append([current, SENTENCE_PAUSE_MS])
-            *finished, current = textwrap.wrap(
-                sentence, width=CHUNK_LIMIT, break_on_hyphens=False,
-            )
+            *finished, current = split_long_sentence(sentence)
             chunks.extend([piece, CLAUSE_PAUSE_MS] for piece in finished)
         if current:
             chunks.append([current, SENTENCE_PAUSE_MS])
@@ -177,6 +205,11 @@ class Store:
                     audio TEXT,
                     PRIMARY KEY (job_id, number)
                 );
+                CREATE TABLE IF NOT EXISTS pronunciations (
+                    id TEXT PRIMARY KEY,
+                    written TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    spoken TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS section_takes (
                     id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
@@ -211,6 +244,8 @@ class Store:
                 db.execute("ALTER TABLE section_takes ADD COLUMN turbo_settings TEXT")
             if "voice_match" not in take_columns:
                 db.execute("ALTER TABLE section_takes ADD COLUMN voice_match TEXT")
+            if "spoken" not in take_columns:
+                db.execute("ALTER TABLE section_takes ADD COLUMN spoken TEXT")
             if "transcript" not in {column["name"] for column in db.execute("PRAGMA table_info(voices)")}:
                 db.execute("ALTER TABLE voices ADD COLUMN transcript TEXT NOT NULL DEFAULT ''")
             for name, kind in (("rendered_engine", "TEXT"), ("rendered_device", "TEXT"),
@@ -224,6 +259,13 @@ class Store:
             # Existing recordings keep their original joins; new recordings trim section edge silence.
             if "trim_edges" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN trim_edges INTEGER NOT NULL DEFAULT 0")
+            # Existing recordings keep 24 kHz exports and no final loudness pass until the owner chooses one.
+            if "master_rate" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN master_rate INTEGER NOT NULL DEFAULT 24000")
+            if "loudness_target" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN loudness_target REAL")
+            if "export_loudness" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN export_loudness TEXT")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -287,8 +329,34 @@ class Store:
                 SELECT id, title, status, created_at FROM jobs ORDER BY rowid DESC
             """).fetchall()
             voices = db.execute("SELECT * FROM voices ORDER BY rowid DESC").fetchall()
+            words = db.execute("SELECT * FROM pronunciations ORDER BY written COLLATE NOCASE").fetchall()
             return {"voice": self.active_voice(db), "voices": [dict(voice) for voice in voices],
-                    "jobs": [dict(job) for job in jobs]}
+                    "jobs": [dict(job) for job in jobs], "pronunciations": [dict(word) for word in words]}
+
+    def pronunciation_pairs(self):
+        with self.connect() as db:
+            return [(row["written"], row["spoken"]) for row in db.execute("SELECT written, spoken FROM pronunciations")]
+
+    def save_pronunciation(self, written, spoken):
+        written, spoken = " ".join(written.split()), " ".join(spoken.split())
+        if not re.search(r"\w", written) or not spoken:
+            raise StudioError("Enter the written word and how to say it.")
+        if len(written) > WRITTEN_LIMIT or len(spoken) > SPOKEN_LIMIT:
+            raise StudioError("Shorten the word or its pronunciation.")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT id FROM pronunciations WHERE written = ?", (written,)).fetchone()
+            word_id = existing["id"] if existing else new_id()
+            db.execute("""
+                INSERT INTO pronunciations (id, written, spoken) VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET written = excluded.written, spoken = excluded.spoken
+            """, (word_id, written, spoken))
+            return {"id": word_id, "written": written, "spoken": spoken}
+
+    def delete_pronunciation(self, word_id):
+        with self.connect() as db:
+            if db.execute("DELETE FROM pronunciations WHERE id = ?", (word_id,)).rowcount == 0:
+                raise StudioError("Pronunciation not found.", 404)
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
                    voice_match="standard", directed_available=False):
@@ -310,10 +378,11 @@ class Store:
                                      directed_available, voice["transcript"])
             uses_voxcpm = any(section["instructions"] or section["voice_match"] == "maximum" for section in sections)
             db.execute("""
-                INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
+                                  master_rate, loudness_target)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
-                  now(), instructions))
+                  now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
                 if section["instructions"] or section["voice_match"] == "maximum":
@@ -362,7 +431,7 @@ class Store:
             """).fetchone()
             return row["id"] if row else None
 
-    def finish_section(self, job_id, number, audio, details=None, seed=None):
+    def finish_section(self, job_id, number, audio, details=None, seed=None, spoken=None):
         details = details or {}
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -374,11 +443,11 @@ class Store:
             db.execute("""
                 INSERT INTO section_takes
                     (id, job_id, section_number, audio, text, instructions, seed, engine, device, runtime, model_sha256, created_at,
-                     turbo_settings, voice_match)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     turbo_settings, voice_match, spoken)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (new_id(), job_id, number, audio, section["text"], section["instructions"], seed,
                   details.get("engine"), details.get("device"), details.get("runtime"), details.get("model_sha256"), rendered_at,
-                  section["turbo_settings"], section["voice_match"]))
+                  section["turbo_settings"], section["voice_match"], spoken))
             db.execute("""
                 UPDATE sections SET pending = 0, audio = ?, rendered_engine = ?, rendered_device = ?,
                     rendered_runtime = ?, rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?
@@ -418,10 +487,22 @@ class Store:
                   take["turbo_settings"], take["voice_match"], job_id, number))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
-    def finish_job(self, job_id, export):
+    def finish_job(self, job_id, export, loudness=None):
         with self.connect() as db:
-            db.execute("UPDATE jobs SET status = 'ready', export = ?, error = NULL WHERE id = ?",
-                       (export, job_id))
+            db.execute("UPDATE jobs SET status = 'ready', export = ?, error = NULL, export_loudness = ? WHERE id = ?",
+                       (export, json.dumps(loudness) if loudness else None, job_id))
+
+    def set_loudness(self, job_id, target):
+        if target is not None and target not in LOUDNESS_TARGETS:
+            raise StudioError("Choose a supported loudness target.")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            job = self.get_job(db, job_id)
+            if job["status"] != "ready":
+                raise StudioError("Wait for the recording to finish before changing its loudness.", 409)
+            if job["loudness_target"] == target:
+                return
+            db.execute("UPDATE jobs SET loudness_target = ?, status = 'queued', error = NULL WHERE id = ?", (target, job_id))
 
     def fail_job(self, job_id, error):
         with self.connect() as db:

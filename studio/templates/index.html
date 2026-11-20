@@ -40,6 +40,19 @@
           <div id="script-engine"></div>
           <div id="script-instructions"></div>
           <div id="script-advanced"></div>
+          <details id="pronunciations" class="advanced-settings">
+            <summary>Pronunciations and spoken words</summary>
+            <p class="muted advanced-intro">Dates, times, prices, percentages, phone numbers, years and common abbreviations are written out as words before the voice reads them; your script stays as written. Add words the voice gets wrong, such as names, brands or acronyms. Changes apply to sections generated afterwards.</p>
+            <ul id="pronunciation-list" class="pronunciation-list" aria-label="Saved pronunciations"></ul>
+            <div class="pronunciation-form">
+              <label for="pronunciation-written">Written <input id="pronunciation-written" maxlength="100" placeholder="e.g. Kubernetes" autocomplete="off"></label>
+              <label for="pronunciation-spoken">Say it as <input id="pronunciation-spoken" maxlength="200" placeholder="e.g. koo-ber-NET-eez" autocomplete="off"></label>
+              <button class="button button-quiet" id="pronunciation-add" type="button">Save word</button>
+            </div>
+            <p id="pronunciation-error" class="error" role="alert" hidden></p>
+            <div class="form-footer"><button class="button button-quiet" id="spoken-preview-button" type="button">Preview spoken words</button></div>
+            <p id="spoken-preview" class="take-text" hidden></p>
+          </details>
           <div class="form-footer"><button class="button button-quiet" type="button" id="prepare-sections">Prepare sections</button></div>
           <div id="prepared-editor" hidden>
             <p class="muted">Edit each section before generating. Sections with sound cues use Chatterbox. Sections with special instructions use VoxCPM2.</p>
@@ -123,6 +136,17 @@
               <a class="button button-quiet" id="download-mp3">Download MP3</a>
             </div>
           </div>
+          <div id="loudness-control" class="loudness-control" hidden>
+            <label for="loudness-target">Delivery loudness</label>
+            <select id="loudness-target">
+              <option value="-16">−16 LUFS · podcasts and web</option>
+              <option value="-14">−14 LUFS · online video and streaming</option>
+              <option value="-23">−23 LUFS · broadcast (EBU R128)</option>
+              <option value="-24">−24 LUFS · US broadcast (ATSC A/85)</option>
+              <option value="">Off · section balancing only</option>
+            </select>
+            <p class="muted instructions-hint" id="loudness-result"></p>
+          </div>
           <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
           <button class="button button-quiet" id="balance" type="button" hidden>Balance volume</button>
         </section>
@@ -186,14 +210,15 @@
         <label for="">Special instructions <span class="muted">· Optional</span></label>
         <select aria-label="Choose a delivery example">
           <option value="">Choose an example</option>
-          <option value="Read in a hushed whisper, with deliberate pauses.">Hushed whisper</option>
-          <option value="Start restrained and build tension toward the end.">Build tension</option>
-          <option value="Read at an even pace with a warm, conversational tone.">Warm narration</option>
+          <option value="hushed whisper, slow, with deliberate pauses">Hushed whisper</option>
+          <option value="restrained at first, building tension toward the end">Build tension</option>
+          <option value="warm, conversational narrator, even pace">Warm narration</option>
+          <option value="energetic, upbeat TV commercial announcer, clear and confident">TV advertisement</option>
         </select>
       </div>
       <textarea rows="2" maxlength="{{ instructions_limit }}" placeholder="Describe how to read the script…"></textarea>
       <p class="muted instructions-hint">
-        {% if directed_available %}Write your own directions for emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 will try to follow them, and results can vary. Put spoken words in the script.
+        {% if directed_available %}Describe the voice and delivery, for example "energetic, upbeat commercial announcer" or "calm, slow, reassuring". Descriptions tend to work better than commands such as "Read like…". Instructions use VoxCPM2's directed mode, which does not use the reference transcript. Results vary, so listen to each take. Put spoken words in the script.
         {% else %}Set up local VoxCPM2 to generate a recording with directions. See the README.{% endif %}
       </p>
     </div>

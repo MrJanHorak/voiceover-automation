@@ -14,7 +14,10 @@ from uuid import uuid4
 
 
 MAX_REFERENCE_BYTES = 16 * 1024 * 1024
-RATE = 24000
+RATE = 24000  # References, Chatterbox output and recordings made before the 48 kHz master.
+MASTER_RATE = 48000  # VoxCPM2's native rate; new recordings are assembled at this rate.
+TRUE_PEAK_DB = -1.0
+LOUDNESS_TARGETS = (-14.0, -16.0, -23.0, -24.0)
 TARGET_LOUDNESS = -20.0
 PEAK_LIMIT = -2.0
 MAX_GAIN = 48.0
@@ -82,6 +85,26 @@ def prepare_reference(source, destination):
     return round(seconds, 1)
 
 
+def fade_joins(pieces, fade_ms=15):
+    """Fade 16-bit PCM pieces in and out where they meet so joins do not click."""
+    import numpy as np
+
+    if len(pieces) < 2:
+        return pieces
+    fade = RATE * fade_ms // 1000
+    result = []
+    for index, piece in enumerate(pieces):
+        samples = np.frombuffer(piece, dtype="<i2").astype(np.float64)
+        length = min(fade, samples.size // 2)
+        if length:
+            if index > 0:
+                samples[:length] *= np.linspace(0.0, 1.0, length)
+            if index + 1 < len(pieces):
+                samples[-length:] *= np.linspace(1.0, 0.0, length)
+        result.append(np.round(samples).astype("<i2").tobytes())
+    return result
+
+
 def combine_reference_excerpts(excerpts):
     """Join bounded excerpts of normalized saved references without changing them."""
     output = BytesIO()
@@ -105,6 +128,7 @@ def combine_reference_excerpts(excerpts):
                 pieces.append(piece)
         if total_frames < 6 * RATE:
             raise AudioError("The combined reference must be 6 to 30 seconds.")
+        pieces = fade_joins(pieces)
         if not any(any(piece) for piece in pieces):
             raise AudioError("The selected excerpts are silent.")
         with wave.open(output, "wb") as combined:
@@ -216,10 +240,12 @@ class DirectedEngine(ModelDetails):
             if not audio.size or not np.isfinite(audio).all() or not audio.any():
                 raise AudioError("The directed model returned unusable audio. Try a shorter section.")
             source_rate = self.model.tts_model.sample_rate
-            divisor = gcd(source_rate, RATE)
-            audio = resample_poly(audio, RATE // divisor, source_rate // divisor).astype(np.float32)
-            audio = self.watermarker.apply_watermark(audio, sample_rate=RATE)
-        sf.write(output, audio, RATE, subtype="PCM_16")
+            if source_rate != MASTER_RATE:
+                divisor = gcd(source_rate, MASTER_RATE)
+                audio = resample_poly(audio, MASTER_RATE // divisor, source_rate // divisor)
+            audio = self.watermarker.apply_watermark(np.asarray(audio, dtype=np.float32), sample_rate=MASTER_RATE)
+        # Keep VoxCPM2's 48 kHz output; the export resamples only when a recording uses 24 kHz.
+        sf.write(output, audio, MASTER_RATE, subtype="PCM_16")
 
 
 class CudaDirectedEngine(ModelDetails):
@@ -303,12 +329,13 @@ class CudaDirectedEngine(ModelDetails):
                 raise AudioError("VoxCPM2 GPU returned an unreadable recording. Retry the section.") from error
             if audio.ndim != 1 or not audio.size or not np.isfinite(audio).all() or not audio.any():
                 raise AudioError("VoxCPM2 GPU returned unusable audio. Try a shorter section.")
-            divisor = gcd(source_rate, RATE)
-            audio = resample_poly(audio, RATE // divisor, source_rate // divisor).astype(np.float32)
+            if source_rate != MASTER_RATE:
+                divisor = gcd(source_rate, MASTER_RATE)
+                audio = resample_poly(audio, MASTER_RATE // divisor, source_rate // divisor).astype(np.float32)
             if self.watermarker is None:
                 self.watermarker = perth.PerthImplicitWatermarker()
-            audio = self.watermarker.apply_watermark(audio, sample_rate=RATE)
-            sf.write(output, audio, RATE, subtype="PCM_16")
+            audio = self.watermarker.apply_watermark(audio, sample_rate=MASTER_RATE)
+            sf.write(output, audio, MASTER_RATE, subtype="PCM_16")
 
 
 def balanced_section(source):
@@ -322,7 +349,7 @@ def balanced_section(source):
     if destination.is_file():
         return destination
     audio, rate = sf.read(source, dtype="float64")
-    if audio.ndim != 1 or rate != RATE or not audio.size or not np.isfinite(audio).all():
+    if audio.ndim != 1 or rate not in (RATE, MASTER_RATE) or not audio.size or not np.isfinite(audio).all():
         raise AudioError("A section has an unexpected audio format. Regenerate that section.")
     if not audio.any():
         raise AudioError("A section is silent. Regenerate that section.")
@@ -384,21 +411,189 @@ def trim_edge_silence(samples, rate=RATE, threshold_db=-45.0, window_ms=10,
     return np.round(trimmed).astype(np.int16)
 
 
-def export_audio(chunks, wav_path, mp3_path, trim=False):
-    """Join sections in order. With `trim`, each pause is the full gap between sections."""
+def tighten_pauses(samples, rate, max_pause_ms=550, threshold_db=-40.0, window_ms=10, crossfade_ms=10):
+    """Shorten silences inside speech that run longer than `max_pause_ms`.
+
+    The model sometimes leaves a very long gap between sentences in one section. The silence
+    on each side of the cut is kept, so a natural pause remains; shorter pauses are untouched.
+    """
     import numpy as np
 
-    with wave.open(str(wav_path), "wb") as master:
-        master.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
-        for index, (path, pause_ms) in enumerate(chunks):
-            with wave.open(str(balanced_section(path)), "rb") as chunk:
-                if (chunk.getnchannels(), chunk.getsampwidth(), chunk.getframerate()) != (1, 2, RATE):
-                    raise AudioError("A section has an unexpected audio format. Regenerate that section.")
-                frames = chunk.readframes(chunk.getnframes())
-            if trim:
-                frames = trim_edge_silence(np.frombuffer(frames, dtype="<i2")).astype("<i2").tobytes()
-            master.writeframesraw(frames)
-            if index + 1 < len(chunks):
-                master.writeframesraw(bytes(RATE * 2 * pause_ms // 1000))
+    audio = np.asarray(samples, dtype=np.int16)
+    window = max(1, rate * window_ms // 1000)
+    count = audio.size // window
+    if count < 3:
+        return audio
+    blocks = audio[:count * window].astype(np.float64).reshape(count, window)
+    rms = np.sqrt(np.mean(blocks * blocks, axis=1))
+    loudest = float(rms.max())
+    if loudest <= 0:
+        return audio
+    quiet = rms < loudest * 10 ** (threshold_db / 20)
+    limit = max(1, max_pause_ms // window_ms)
+    fade = rate * crossfade_ms // 1000
+    keep_each_side = limit * window // 2
+    pieces, position, start = [], 0, None
+    for index in range(count + 1):
+        is_quiet = index < count and quiet[index]
+        if is_quiet and start is None:
+            start = index
+        elif not is_quiet and start is not None:
+            # Only gaps between speech: leading and trailing silence is handled by edge trimming.
+            if start > 0 and index < count and index - start > limit:
+                cut_from = start * window + keep_each_side
+                cut_to = index * window - keep_each_side
+                pieces.append(audio[position:cut_from].astype(np.float64))
+                position = cut_to
+            start = None
+    if not pieces:
+        return audio
+    pieces.append(audio[position:].astype(np.float64))
+    joined = pieces[0]
+    for piece in pieces[1:]:
+        overlap = min(fade, joined.size, piece.size)
+        if overlap:
+            ramp = np.linspace(0.0, 1.0, overlap)
+            blended = joined[-overlap:] * (1 - ramp) + piece[:overlap] * ramp
+            joined = np.concatenate([joined[:-overlap], blended, piece[overlap:]])
+        else:
+            joined = np.concatenate([joined, piece])
+    return np.round(joined).astype(np.int16)
+
+
+def read_section(path, rate):
+    """Read a level-balanced section as 16-bit samples at `rate`, resampling when needed."""
+    import numpy as np
+    from scipy.signal import resample_poly
+
+    with wave.open(str(balanced_section(path)), "rb") as chunk:
+        if (chunk.getnchannels(), chunk.getsampwidth()) != (1, 2) or chunk.getframerate() not in (RATE, MASTER_RATE):
+            raise AudioError("A section has an unexpected audio format. Regenerate that section.")
+        source_rate = chunk.getframerate()
+        samples = np.frombuffer(chunk.readframes(chunk.getnframes()), dtype="<i2")
+    if source_rate == rate:
+        return samples.astype(np.int16)
+    divisor = gcd(source_rate, rate)
+    converted = resample_poly(samples.astype(np.float64), rate // divisor, source_rate // divisor)
+    return np.clip(np.round(converted), -32768, 32767).astype(np.int16)
+
+
+def ffmpeg_report(*arguments):
+    """Run FFmpeg and return its diagnostic output, which carries loudnorm's measurements."""
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "info", *arguments],
+            check=True, capture_output=True, text=True, timeout=300,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except FileNotFoundError as error:
+        raise AudioError("Install FFmpeg and make it available on PATH.") from error
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise AudioError("FFmpeg could not finish processing the audio.") from error
+    return result.stderr
+
+
+def loudnorm_values(report):
+    import json
+
+    start = report.rfind("{")
+    end = report.rfind("}")
+    if start < 0 or end < start:
+        raise AudioError("FFmpeg did not report loudness measurements.")
+    try:
+        return json.loads(report[start:end + 1])
+    except ValueError as error:
+        raise AudioError("FFmpeg reported unreadable loudness measurements.") from error
+
+
+def measure_loudness(source, settings):
+    measured = loudnorm_values(ffmpeg_report("-i", str(source), "-af", f"loudnorm={settings}:print_format=json",
+                                             "-f", "null", "-"))
+    try:
+        values = {key: float(measured[key]) for key in ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")}
+    except (KeyError, TypeError, ValueError) as error:
+        raise AudioError("FFmpeg reported incomplete loudness measurements.") from error
+    if not all(math.isfinite(value) for value in values.values()):
+        raise AudioError("The recording is too quiet or short to measure its loudness.")
+    return values
+
+
+def normalize_loudness(source, destination, target, rate):
+    """Two-pass EBU R128 normalization to `target` LUFS with a true-peak ceiling.
+
+    When reaching the target would push peaks over the ceiling, a lookahead limiter first
+    lowers only those peaks, so loudnorm can still apply one even gain (linear mode) instead
+    of falling back to its dynamic mode, which tends to undershoot on short recordings.
+    """
+    settings = f"I={target}:TP={TRUE_PEAK_DB}:LRA=20"
+    values = measure_loudness(source, settings)
+    gain = target - values["input_i"]
+    limited = destination.with_name(f".{destination.stem}-limited.wav")
+    try:
+        if values["input_tp"] + gain > TRUE_PEAK_DB - 0.1:
+            # Raise the level inside a lookahead limiter that holds peaks 2.5 dB under the ceiling.
+            # Limiting costs some loudness, so add back the shortfall and repeat (at most four
+            # passes) until the final linear pass fits under the true-peak ceiling.
+            original, level_db = source, gain
+            ceiling = 10 ** ((TRUE_PEAK_DB - 2.5) / 20)
+            for _attempt in range(4):
+                level = min(64.0, max(0.015625, 10 ** (level_db / 20)))
+                ffmpeg("-y", "-i", str(original), "-af",
+                       f"alimiter=level_in={level:.4f}:limit={ceiling:.4f}:attack=5:release=50:level=false",
+                       "-c:a", "pcm_s16le", str(limited))
+                values = measure_loudness(limited, settings)
+                remaining = target - values["input_i"]
+                if values["input_tp"] + remaining <= TRUE_PEAK_DB - 0.1:
+                    break
+                level_db += remaining
+            source = limited
+        return _apply_loudnorm(source, destination, settings, values, target, rate)
+    finally:
+        limited.unlink(missing_ok=True)
+
+
+def _apply_loudnorm(source, destination, settings, values, target, rate):
+    second = (f"loudnorm={settings}:measured_I={values['input_i']}:measured_TP={values['input_tp']}:"
+              f"measured_LRA={values['input_lra']}:measured_thresh={values['input_thresh']}:"
+              f"offset={values['target_offset']}:linear=true:print_format=json")
+    result = loudnorm_values(ffmpeg_report("-n", "-i", str(source), "-af", second, "-ar", str(rate),
+                                           "-c:a", "pcm_s16le", str(destination)))
+    def number(key):
+        try:
+            return round(float(result[key]), 2)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    return {"target": target, "integrated": number("output_i"), "true_peak": number("output_tp"),
+            "mode": result.get("normalization_type")}
+
+
+def export_audio(chunks, wav_path, mp3_path, trim=False, rate=RATE, loudness=None):
+    """Join sections in order and write the WAV master and MP3.
+
+    With `trim`, edge silence is removed, overlong pauses inside a section are shortened and
+    each pause is the full gap between sections. With `loudness`, the master is normalized to
+    that many LUFS with a true-peak ceiling. Returns the loudness measurements, if any.
+    """
+    import numpy as np
+
+    assembled = wav_path.with_name(f".{wav_path.stem}-assembled.wav") if loudness is not None else wav_path
+    try:
+        with wave.open(str(assembled), "wb") as master:
+            master.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+            for index, (path, pause_ms) in enumerate(chunks):
+                samples = read_section(path, rate)
+                if trim:
+                    samples = tighten_pauses(trim_edge_silence(samples, rate), rate)
+                master.writeframesraw(samples.astype("<i2").tobytes())
+                if index + 1 < len(chunks):
+                    master.writeframesraw(bytes(rate * 2 * pause_ms // 1000))
+        measurement = None
+        if loudness is not None:
+            measurement = normalize_loudness(assembled, wav_path, loudness, rate)
+    finally:
+        if assembled != wav_path:
+            assembled.unlink(missing_ok=True)
 
     ffmpeg("-n", "-i", str(wav_path), "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3_path))
+    return measurement

@@ -16,6 +16,44 @@ The 2026-11-19 review found that the code is sound but that several details limi
 
 New model-free tests are in `tests/test_joins.py`; the long-workflow test now expects the paragraph pause. Run the full suite on Windows with the studio environment. The owner should listen to a new multi-paragraph recording and adjust the pause constants in `studio/store.py` if needed.
 
+### Garbled section diagnosis · 2026-11-19
+
+In the "number test" recording, the owner heard unclear speech at the start of "The Pro plan costs $1,299.99…". The normalized text sent to the model was correct and the 10.7-second length fits 28 words at an ad-read pace, so the model mispronounced words rather than adding any. The section had the instruction "Read like a TV advertisement", so it used VoxCPM2 Q8's directed mode on the GPU without the reference transcript, even though maximum resemblance was selected; its spectrogram shows a flatter, less defined pitch than the neighbouring section. Likely causes are the command-style instruction and the compressed Q8 model. Changes:
+
+- Instruction examples are now voice descriptions (VoxCPM2's documented form), including a "TV advertisement" example, and the hint explains that descriptions work better than commands.
+- The UI says when special instructions override maximum resemblance, for a section and for the whole script.
+- The loudness pass undershot (−17.6 LUFS for −16) because loudnorm fell back to its dynamic mode when reaching the target would exceed the true-peak ceiling. It now raises the level inside a lookahead limiter (peaks held 2.5 dB under the ceiling, up to four passes) before the linear pass. On the owner's real sections, all four targets landed within 0.2 LU with true peaks at or below −1.2 dBTP, confirmed by an independent `ebur128` measurement.
+
+Next for the owner: regenerate that section with a description such as "energetic, upbeat TV commercial announcer", and also try it with maximum resemblance and no instructions; compare with the CPU directed mode if the GPU take is still unclear. Automatic transcription checks (roadmap step 5) would catch this kind of problem without listening.
+
+### Delivery quality · 2026-11-19 (roadmap step 4, implemented, not yet heard)
+
+The owner confirmed that the GPU path for maximum resemblance works and is faster, and that the long-sentence and date fixes sound better. One remaining issue was a long pause between "Short and sweet." and "That's the goal." inside one section. Measurement of the section audio showed the model's own silence: about 2.0 s on the GPU, 0.77 s on the CPU and 0.44 s with Chatterbox.
+
+- **Pause cap.** `tighten_pauses` shortens silences longer than 550 ms inside speech for recordings with `trim_edges`, keeping half the allowance on each side with a 10 ms crossfade. On the owner's GPU section it removes about 1.5 s. Section previews still play the untouched audio.
+- **48 kHz master.** Both VoxCPM2 engines now write 48 kHz sections. New recordings (`jobs.master_rate = 48000`) assemble at 48 kHz, upsampling Chatterbox's 24 kHz sections; older recordings keep 24 kHz and resample any new 48 kHz sections down. Perth watermarks at 32 kHz internally and returns the whole signal through that rate, so VoxCPM2 detail now reaches about 16 kHz instead of 12 kHz. The watermark implementation is unchanged.
+- **Final loudness pass.** New recordings default to −16 LUFS (`jobs.loudness_target`) with a −1 dBTP true-peak ceiling via FFmpeg two-pass `loudnorm` (linear mode where possible). Choices: −14, −16, −23, −24 or off; changing it rebuilds exports. The measured result is stored in `jobs.export_loudness` and shown in the Recording panel. A synthetic check reached −15.8 LUFS for a −16 target, confirmed by an independent `ebur128` measurement.
+- **Combined references** fade 15 ms at each join.
+- **GPU render order.** With the exclusive GPU backend, pending Chatterbox sections render before VoxCPM2 sections; the export keeps script order.
+
+Tests: `tests/test_delivery.py`; `test_long_workflow`, `test_directed_gpu` and `test_reference_builder` were updated for 48 kHz and join fades. The model-free and FFmpeg tests passed in a Linux check; the routing tests need the Windows studio environment. A copy of the live database migrated intact.
+
+Next for the owner: regenerate the test script, listen to the "Short and sweet" gap, compare a −16 LUFS export with an earlier one, and test number handling with a price, date, time and phone number.
+
+### Listening feedback and spoken words · 2026-11-19 (roadmap step 3, implemented)
+
+The owner reported that maximum resemblance on the CPU sounds much more realistic than before. Two issues were fixed:
+
+- **Unnatural pause before "click buy".** A 316-character sentence was wrapped at 220 characters, mid-phrase. `split_long_sentence` now breaks at the clause punctuation (comma, semicolon, colon or dash) closest to a balanced split, falling back to the balanced word boundary only when there is no punctuation.
+- **"Jan five" for "Jan. 5".** New `studio/normalize.py` converts written text into spoken words at render time: month abbreviations and dates with ordinals, titles, e.g./i.e./etc., times with A M/P M, money with cents and scales, percentages, ordinals, years, ranges, phone numbers, web and email addresses, initialisms and remaining numbers. Bracketed sound cues are untouched. No external package is needed.
+- **Pronunciation list.** Owner-edited whole-word replacements (`pronunciations` table) apply before the automatic rules and to every newly rendered section. Each new take stores the spoken text it used (`section_takes.spoken`). The UI previews spoken words for a draft and shows them per section.
+
+Tests: `tests/test_spoken_text.py` (passed in a Linux check, with the store and voice-match tests). A copy of the live database migrated intact, and all 192 existing section texts normalized without error.
+
+The owner's maximum-resemblance run used the CPU because the studio was started with the directed environment and no device variables. To try the GPU path, start with `cuda-benchmark-env` and both `VOICEOVER_DEVICE` and `VOICEOVER_DIRECTED_DEVICE` set to `cuda`, as in the README. CPU generation took roughly 1–4 minutes per section at about 2.3 seconds per step; the progress bar stopping at 20–33% is normal because generation ends when the speech is complete.
+
+Next for the owner: regenerate the test script, check the long-sentence join and the date, try the GPU path, and add any mispronounced names to the pronunciation list.
+
 ### Maximum resemblance · 2026-11-19 (roadmap step 2, implemented, not yet heard)
 
 - Each saved reference has an editable **transcript** (`voices.transcript`, up to 1,000 characters), entered by the owner under **Voice reference**. No local speech-recognition model is installed, so drafting the transcript automatically is deferred; `funasr` is present in the directed environment but has no downloaded model.
@@ -75,7 +113,7 @@ The local studio implements enrollment, pasted text, UTF-8 `.txt`, Word `.docx`,
 - **Voice profile** takes the owner's reference WAV, validates duration and format, and keeps a normalized copy with an internal ID and revision. Let the owner replace the active reference without changing previous exports. Keep enrollment owner-only throughout both phases.
 - **Script editor** accepts pasted text and UTF-8 `.txt`, `.docx`, and text-based `.pdf` uploads. It shows extracted text for review, flags PDFs with no extractable text, and limits files to 10 MB and scripts to 12,000 characters.
 - **Generation** splits longer scripts at paragraph and sentence boundaries, with a bounded fallback for long sentences. Preserve the ordered chunks and avoid silent truncation. The worker conditions on the selected voice profile and renders one job at a time. Record progress and actionable failures, and let the operator retry a failed chunk. After a restart, mark interrupted jobs for retry. New section audio records its actual engine, device, runtime, seed, and primary model hash; each job retains its original reference ID. Older sections retain unknown engine details rather than inferred values.
-- **Review and export** provide browser playback for each chunk and for the assembled take. Let the operator correct pronunciation in the synthesis text or regenerate individual chunks. New section takes retain their audio, words, instructions, and available generation details. Operators can compare takes and restore one, rebuilding the WAV and MP3 without synthesizing again. Earlier unindexed audio cannot be reliably attributed to a take. Assemble approved chunks in order with pauses and offer WAV and MP3. The current studio converts output to 24 kHz mono; configurable delivery formats and native-rate masters remain future work. Keep the engine's watermarking enabled and preserve prior usable takes during regeneration.
+- **Review and export** provide browser playback for each chunk and for the assembled take. Let the operator correct pronunciation in the synthesis text or regenerate individual chunks. New section takes retain their audio, words, instructions, and available generation details. Operators can compare takes and restore one, rebuilding the WAV and MP3 without synthesizing again. Earlier unindexed audio cannot be reliably attributed to a take. Assemble approved chunks in order with pauses and offer WAV and MP3. New recordings use a 48 kHz mono master with a selectable final loudness target; recordings made earlier keep 24 kHz. Keep the engine's watermarking enabled and preserve prior usable takes during regeneration.
 - **History and storage** provide status, playback, download, and deletion for local jobs. Store uploads, generated audio, and SQLite under `data/` or an explicitly configured private directory. Expose files by internal IDs through app routes. Keep private files out of static assets, logs, and Git.
 
 ### Verify the workflow
@@ -98,8 +136,8 @@ Work in this order. Each step should be heard and compared with the previous bes
 
 1. **Done, pending listening:** section edge trimming, sentence and paragraph pauses, abbreviation-aware splitting, kept original references and 192 kbps MP3.
 2. **Implemented, pending listening: maximum-resemblance mode.** Add VoxCPM2 "ultimate cloning", which passes the reference audio and its exact transcript (`prompt_wav_path`, `prompt_text`, plus the same file as `reference_wav_path`). Store a transcript with each reference, drafted by local speech recognition and corrected by the owner. Compare against Chatterbox and controllable cloning on the same scripts.
-3. **Text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
-4. **Delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
+3. **Implemented: text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
+4. **Implemented, pending listening: delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
 5. **Automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
 6. **Fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
 7. **Fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.

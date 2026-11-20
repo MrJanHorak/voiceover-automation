@@ -39,7 +39,10 @@ class ReferenceBuilderTests(unittest.TestCase):
                 with wave.open(io.BytesIO(preview.content), "rb") as audio:
                     self.assertEqual(audio.getnframes(), 6 * RATE)
                     self.assertEqual(audio.readframes(1), (-2000).to_bytes(2, "little", signed=True))
+                    # The join at three seconds fades in over 15 ms so it does not click.
                     audio.setpos(3 * RATE)
+                    self.assertEqual(audio.readframes(1), (0).to_bytes(2, "little", signed=True))
+                    audio.setpos(3 * RATE + RATE // 10)
                     self.assertEqual(audio.readframes(1), (1000).to_bytes(2, "little", signed=True))
                 saved = client.post("/api/voice/combine", json=data, headers=headers)
                 self.assertEqual(saved.status_code, 201)

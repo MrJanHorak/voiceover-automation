@@ -11,7 +11,7 @@ import perth  # Load optional dependencies before mocking subprocess.
 import scipy.signal
 import soundfile as sf
 
-from studio.audio import AudioError, CudaDirectedEngine, RATE
+from studio.audio import MASTER_RATE, AudioError, CudaDirectedEngine, RATE
 from studio.app import render_job
 
 
@@ -51,7 +51,7 @@ class CudaDirectedEngineTests(unittest.TestCase):
         self.assertNotIn("Private script.", " ".join(command))
         self.assertIn("voxcpm2.audiovae_encoder_sample_capacity=240000", command)
         self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
-        self.assertEqual(sf.info(self.output).samplerate, RATE)
+        self.assertEqual(sf.info(self.output).samplerate, MASTER_RATE)
         self.assertFalse(list(self.root.glob(".directed-*")))
 
     def test_switch_releases_gpu_and_failure_keeps_existing_audio(self):
