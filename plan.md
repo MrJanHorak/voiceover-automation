@@ -69,7 +69,30 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
 
 Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
 
-### Rented-GPU training kit · 2026-11-20 (roadmap step 7, in progress)
+### First LoRA training run · 2026-11-20 (roadmap step 7, trained; listening pending)
+
+- The run used Runpod pod `w8emlwn48mo89p`: an NVIDIA A40 48 GB on Secure Cloud in EU-SE-1, at $0.59 an hour, with the `runpod-torch-v280` template (torch 2.8.0+cu128). The pod was deleted on the owner's approval at about 16:45 New York time, and the account now has no pods. Total cost was about $0.35, leaving a balance of $9.65.
+- **Bug found:** the trainer resolves `audio` paths against its working folder, not against the jsonl's folder. `train_on_pod.sh` now rewrites both lists to absolute paths before training.
+- **Training:** 300 steps took about 14 minutes, at about 2 seconds a step plus audio previews every 25 steps; 300 steps is about 27 passes over the data. Validation results:
+
+  | Step | Total loss | Diff loss | Stop loss |
+  | ---: | ---: | ---: | ---: |
+  | 0 | 0.947 | 0.796 | 0.150 |
+  | 50 | 0.870 | 0.786 | 0.084 |
+  | 100 | 0.871 | 0.764 | 0.107 |
+  | 150 | 0.887 | 0.756 | 0.131 |
+  | 200 | 0.891 | 0.751 | 0.139 |
+  | 225 | 0.926 | 0.772 | 0.155 |
+  | 299 | 0.950 | 0.775 | 0.175 |
+
+  The diff loss is best around step 200, while the stop loss gets worse after step 50, because training data is overfitting on when to stop. Steps 150–200 are the expected sweet spot. If a next run is needed, use a lower learning rate or fewer steps (about 150), or more recordings.
+- **Outputs**, which the owner downloads from the pod's Jupyter before deletion:
+  - `voice-samples.zip` (12 MB): 34 clips, including baseline, `step_*_alone_{1,2}` and `step_*_with-reference_{1,2}`.
+  - `voice-lora-results.zip` (479 MB): `lora_config.json` and `lora_weights.safetensors` (70 MB each) for steps 50–300, plus the samples and `train.log`.
+  - Both are kept out of Git.
+- **Next:** the owner picks a step by ear. Then the studio loads that adapter, on CPU via `VoxCPM.from_pretrained(lora_config=..., lora_weights_path=...)` and on GPU via audio.cpp's `lora` session option, followed by a blind comparison with zero-shot takes.
+
+### Rented-GPU training kit · 2026-11-20 (roadmap step 7)
 
 The owner recorded and exported 184 clips (19.6 minutes; 175 train, 9 validation, 2.3–15.3 seconds each) to `data/studio/dataset/exports/2026-11-20_154735`. The `training/` folder holds the kit:
 
@@ -78,7 +101,7 @@ The owner recorded and exported 184 clips (19.6 minutes; 175 train, 9 validation
 - `make_samples.py`: for each checkpoint, two test sentences with no reference and with the reference, plus a baseline without the adapter. It passes the checkpoint's own `lora_config.json`, because the library's default `LoRAConfig` uses r=8.
 - `make_kit.py`: zips the newest export, the kit and the active reference. The first kit is `2026-11-20_154735-voice-training-kit.zip` (28 MB).
 
-Per the guide, LoRA needs about 20 GB of VRAM; a 48 GB RTX A6000 is recommended, or a 4090 at batch 8. The owner added Runpod as a custom connector (`https://mcp.runpod.io/`) on 2026-11-20 and asked to be consulted before any charge: show the GPU, hourly price, disk and storage, and an estimated total, and wait for a yes before creating a pod; ask again before stopping or deleting it. The connector's tools did not load in the chat where it was added, so continue in a new chat. The scripts have not been run on a GPU yet; report errors from the pod. Still to do after training: load the chosen adapter in the studio (CPU via `lora_weights_path`; GPU via audio.cpp's `lora` session option) and compare it blind with zero-shot takes.
+Per the guide, LoRA needs about 20 GB of VRAM; a 48 GB RTX A6000 is recommended, or a 4090 at batch 8. The owner added Runpod as a custom connector (`https://mcp.runpod.io/`) on 2026-11-20 and asked to be consulted before any charge: show the GPU, hourly price, disk and storage, and an estimated total, and wait for a yes before creating a pod; ask again before stopping or deleting it. The connector's tools did not load in the chat where it was added, so continue in a new chat. Still to do after training: load the chosen adapter in the studio (CPU via `lora_weights_path`; GPU via audio.cpp's `lora` session option) and compare it blind with zero-shot takes.
 
 ### Voice training dataset builder · 2026-11-20 (roadmap step 6, implemented, not yet used)
 

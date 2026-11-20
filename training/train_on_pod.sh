@@ -13,7 +13,7 @@ if [ ! -d VoxCPM ]; then git clone https://github.com/OpenBMB/VoxCPM.git; fi
 cd VoxCPM
 git fetch --tags --quiet || true
 git checkout 2.0.3 2>/dev/null || git checkout v2.0.3 2>/dev/null || echo "No 2.0.3 tag found; using the default branch."
-pip install --quiet -e .
+pip install --break-system-packages -c <(printf "torch==2.8.0\ntorchaudio==2.8.0\ntorchcodec<0.8\n") -e .
 cd /workspace
 
 echo "== VoxCPM2 model, same revision as the studio"
@@ -21,6 +21,18 @@ if [ ! -f VoxCPM2/model.safetensors ]; then
   pip install --quiet "huggingface_hub[cli]"
   huggingface-cli download openbmb/VoxCPM2 --revision 7936080b41163874f38610f46f438e2c0757f9fd --local-dir VoxCPM2
 fi
+
+echo "== Point the clip lists at full paths (the trainer reads them relative to its own folder)"
+python3 - <<'PY'
+import json, os
+base = "/workspace/kit/dataset"
+for name in ("train.jsonl", "val.jsonl"):
+    path = os.path.join(base, name)
+    rows = [json.loads(line) for line in open(path)]
+    for row in rows:
+        row["audio"] = os.path.join(base, row["audio"])
+    open(path, "w").write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+PY
 
 echo "== Training (checkpoints every 50 steps under /workspace/output/lora)"
 cd VoxCPM
