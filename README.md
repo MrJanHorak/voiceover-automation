@@ -140,6 +140,18 @@ Maximum resemblance uses VoxCPM2's continuation cloning: it receives the voice r
 
 The engine choice applies to sections without a delivery style. Sections with a delivery style still use VoxCPM2's directed mode. Remove bracketed sound cues before using maximum resemblance, because VoxCPM2 would read them aloud. A wrong transcript can cause mispronunciations or artifacts, so check it against the recording. The first section starts with seed 35; regeneration picks a new seed. On the GPU, the studio passes the transcript to audio.cpp with its `ultimate_clone` option; the transcript appears in that process's arguments, but script text does not. Compare the result with Chatterbox on the same script before customer use.
 
+### Trained voice
+
+A trained voice is a small LoRA adapter (about 70 MB) trained on your recordings with the kit in `training/`. VoxCPM2 loads it on top of the unchanged base model, so it needs the VoxCPM2 setup above but no extra model download.
+
+1. From the results zip, copy one checkpoint folder, such as `lora\step_0000150`, to `data\studio\trained\<name>\`, for example `data\studio\trained\step150\`. It must contain `lora_config.json` and `lora_weights.safetensors`. The folder holds your voice and stays out of Git.
+2. Restart the studio. New sections use the newest trained voice folder; set `VOICEOVER_TRAINED_VOICE=<name>` to choose another one.
+3. Under **Voice engine**, choose **Trained voice · no reference** (the adapter alone) or **Trained voice + reference** (the adapter plus your active reference clip). A delivery style still applies, with the trained voice.
+
+[training/TRAINED_VOICES.md](training/TRAINED_VOICES.md) records each trained voice and how to use it in other programs; each voice folder also has its own `VOICE.md` and `voice.json`. Each recording remembers the trained voice it was made with; a section's details show the voice and step. On the CPU, the adapter is switched on only for trained sections, without reloading the model. On the GPU, audio.cpp merges the folder into the Q8 model for each section with its `voxcpm2.lora` session option. Sound cues are not available, as with other VoxCPM2 modes.
+
+**Compare your trained voice**, at the bottom of **Voice training**, renders one sentence with two engines in random order. Listen to clips A and B, choose the one that sounds more like you (or **Can't tell**), and only then see which was which. Your picks are tallied, so a few rounds with different sentences show whether the trained voice beats maximum resemblance or Chatterbox. Comparisons do not appear under **Recordings**.
+
 ### Advanced Chatterbox settings
 
 Open **Advanced Chatterbox settings** on the **Settings** step to adjust seed, temperature, Top P, Top K, repetition penalty, and reference loudness normalization. Select the question mark beside a control for an explanation. These settings apply to Chatterbox sections; sections with special instructions use VoxCPM2 instead. Open a completed section to change its settings when regenerating; the settings and actual seed for new takes appear in **All takes**. The initial seed defaults to `35` to preserve the studio's previous behavior; `0` selects a new random seed, and regeneration starts with `0` for variety. Using a fixed seed can help repeat a take, but results can vary across devices or runtime versions.

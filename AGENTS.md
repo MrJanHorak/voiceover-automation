@@ -10,7 +10,7 @@
 ## Voice and customer files
 
 - The sole production voice is the owner's. Keep reference enrollment owner-only. Use synthetic or explicitly authorized fixtures for testing. Preserve any watermark applied by the model.
-- Keep voice samples, derived voice data, scripts, recordings, model files, databases, and secrets outside version control. Use ignored local directories or an explicitly configured private data directory. Avoid logging script text and audio content.
+- Keep voice samples, derived voice data (including trained adapters under `data/studio/trained/` and training result zips), scripts, recordings, model files, databases, and secrets outside version control. Use ignored local directories or an explicitly configured private data directory. Avoid logging script text and audio content.
 - Bind the Phase 1 app to loopback by default. Validate file content and bounds, use generated IDs for stored paths, and keep private media outside static assets. Serve downloads through app routes with the applicable access checks.
 
 ## Verification

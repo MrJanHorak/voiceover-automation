@@ -4,6 +4,8 @@ const scriptLimit = Number(document.body.dataset.scriptLimit);
 const chunkLimit = Number(document.body.dataset.chunkLimit);
 const maxPause = Number(document.body.dataset.maxPause);
 const directedAvailable = document.body.dataset.directedAvailable === "true";
+const trainedVoice = document.body.dataset.trainedVoice || "";
+const usesVoxcpm = (match) => match !== "standard";
 const statusNames = { queued: "Queued", running: "Generating", ready: "Ready", failed: "Failed" };
 
 let selected = null;
@@ -87,7 +89,10 @@ function showView(name, { remember = true } = {}) {
     else link.removeAttribute("aria-current");
   }
   if (remember && location.hash !== `#${currentView}`) history.replaceState(null, "", `#${currentView}`);
-  if (currentView === "training") loadDataset();
+  if (currentView === "training") {
+    loadDataset();
+    loadComparisons();
+  }
   window.scrollTo({ top: 0 });
 }
 
@@ -104,7 +109,8 @@ function setStep(step) {
 }
 
 function matchReady(instructions, match) {
-  // Maximum resemblance applies only to sections without special instructions.
+  // A trained voice also applies to sections with a delivery style; maximum resemblance does not.
+  if (match === "trained" || match === "trained_reference") return directedAvailable && Boolean(trainedVoice);
   return instructions.trim() || match !== "maximum" || (directedAvailable && Boolean(state.voice?.transcript));
 }
 
@@ -112,7 +118,7 @@ function updateEditor() {
   byId("script-count").textContent = `${script.value.length.toLocaleString()} / ${scriptLimit.toLocaleString()}`;
   const directed = Boolean(scriptDirections.field.value.trim());
   const match = scriptEngine.field.value;
-  scriptSounds.disabled = directed || match === "maximum";
+  scriptSounds.disabled = directed || usesVoxcpm(match);
   const perParagraph = styleMode === "paragraphs";
   const ready = perParagraph
     ? paragraphs.length > 0 && paragraphsFor === script.value
@@ -1031,9 +1037,10 @@ function sectionEditor(entry, section, state) {
   const updateActions = () => {
     const directed = Boolean(directions.field.value.trim());
     const maximum = !directed && engine.field.value === "maximum";
-    sounds.disabled = field.readOnly || directed || maximum;
+    sounds.disabled = field.readOnly || directed || usesVoxcpm(engine.field.value);
     redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
-      || (maximum && (!directedAvailable || !entry.voice_transcript_ready));
+      || (maximum && (!directedAvailable || !entry.voice_transcript_ready))
+      || (engine.field.value.startsWith("trained") && !(directedAvailable && (entry.trained_voice || trainedVoice)));
     redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
     overrideNote.hidden = !(directed && engine.field.value === "maximum");
   };
@@ -1114,7 +1121,7 @@ function takeChooser(entry, section, key) {
     if (takeCheck) detail.append(element("p", `check-result ${takeCheck.className}`, takeCheck.text));
     detail.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
     if (take.instructions) detail.append(element("p", "muted", `Instructions: ${take.instructions}`));
-    if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
+    if (take.turbo_settings && !take.instructions && !usesVoxcpm(take.voice_match || "standard")) {
       const setting = take.turbo_settings;
       detail.append(element("p", "muted", `Seed ${take.seed} · Temperature ${setting.temperature} · Top P ${setting.top_p} · Top K ${setting.top_k} · Repetition ${setting.repetition_penalty} · Reference normalization ${setting.normalize_reference ? "on" : "off"}`));
     }
@@ -1679,6 +1686,126 @@ for (const button of document.querySelectorAll(".step")) {
 byId("to-settings").addEventListener("click", () => setStep(2));
 byId("back-to-step-1").addEventListener("click", () => setStep(1));
 window.addEventListener("hashchange", () => showView(location.hash.slice(1), { remember: false }));
+
+// Blind comparison: one sentence, two voice engines in random order, revealed after a choice.
+const engineNames = {
+  standard: "Chatterbox Turbo", maximum: "Maximum resemblance",
+  trained: "Trained voice", trained_reference: "Trained voice + reference",
+};
+let comparisonSignature = "";
+let comparisonTimer = null;
+
+async function loadComparisons() {
+  window.clearTimeout(comparisonTimer);
+  let data;
+  try {
+    data = await request("/api/comparisons");
+  } catch (error) {
+    errorAt("compare-error", error.message);
+    return;
+  }
+  const trained = data.trained_voice;
+  byId("compare-voice").textContent = trained
+    ? `Trained voice: ${trained.name}${trained.step != null ? ` · step ${trained.step}` : ""}`
+    : "No trained voice yet";
+  byId("compare-start").disabled = !trained || !directedAvailable;
+  if (!directedAvailable) errorAt("compare-error", "Comparisons need the local VoxCPM2 setup described in the README.");
+  const signature = JSON.stringify(data.comparisons);
+  if (signature !== comparisonSignature) {
+    comparisonSignature = signature;
+    renderComparisons(data.comparisons);
+  }
+  const waiting = data.comparisons.some((item) => item.status === "queued" || item.status === "running");
+  if (waiting && currentView === "training") comparisonTimer = window.setTimeout(loadComparisons, 2500);
+}
+
+function renderComparisons(items) {
+  const list = byId("compare-list");
+  list.replaceChildren();
+  const decided = items.filter((item) => item.choice && item.engines);
+  if (decided.length) {
+    const wins = {};
+    let same = 0;
+    for (const item of decided) {
+      if (item.choice === "same") same += 1;
+      else wins[item.engines[item.choice]] = (wins[item.engines[item.choice]] || 0) + 1;
+    }
+    const parts = Object.entries(wins).map(([engine, count]) => `${engineNames[engine] || engine} ${count}`);
+    if (same) parts.push(`no difference ${same}`);
+    byId("compare-tally").textContent = `Your picks so far: ${parts.join(" · ")} (of ${decided.length})`;
+  } else {
+    byId("compare-tally").textContent = items.length ? "" : "No comparisons yet. Make a pair, listen to A and B, then pick.";
+  }
+  for (const item of items) {
+    const row = element("li", "compare-item");
+    row.append(element("p", "compare-sentence", item.text));
+    if (item.status === "failed") {
+      row.append(element("p", "error", item.error || "This comparison could not finish."));
+    } else if (!item.ready) {
+      row.append(element("p", "muted", item.status === "running" ? "Generating both clips…" : "Waiting in the queue…"));
+    } else {
+      const players = element("div", "compare-players");
+      for (const [label, number] of [["A", 1], ["B", 2]]) {
+        const box = element("div", "compare-clip");
+        box.append(element("strong", "", `Clip ${label}`));
+        const audio = element("audio");
+        audio.controls = true;
+        audio.preload = "none";
+        audio.src = `/api/jobs/${item.id}/sections/${number}/audio`;
+        audio.setAttribute("aria-label", `Clip ${label}`);
+        box.append(audio);
+        if (item.engines) {
+          const picked = item.choice === label;
+          box.append(element("span", picked ? "compare-engine picked" : "compare-engine",
+            `${engineNames[item.engines[label]] || item.engines[label]}${picked ? " · your pick" : ""}`));
+        }
+        players.append(box);
+      }
+      row.append(players);
+      if (!item.choice) {
+        const actions = element("div", "form-footer compact");
+        for (const [choice, text] of [["A", "A sounds more like me"], ["B", "B sounds more like me"], ["same", "Can't tell"]]) {
+          const button = element("button", "button button-quiet", text);
+          button.type = "button";
+          button.addEventListener("click", async () => {
+            try {
+              await change(`/api/comparisons/${item.id}`, { method: "PUT", value: { choice } });
+              errorAt("compare-error");
+              await loadComparisons();
+            } catch (error) {
+              errorAt("compare-error", error.message);
+            }
+          });
+          actions.append(button);
+        }
+        row.append(actions);
+      } else if (item.choice === "same") {
+        row.append(element("p", "muted", "You heard no difference."));
+      }
+    }
+    list.append(row);
+  }
+}
+
+byId("compare-start").addEventListener("click", async () => {
+  const button = byId("compare-start");
+  const baseline = byId("compare-baseline").value;
+  const contender = byId("compare-contender").value;
+  if (baseline === contender) {
+    errorAt("compare-error", "Choose two different voice engines.");
+    return;
+  }
+  button.disabled = true;
+  errorAt("compare-error");
+  try {
+    await change("/api/comparisons", { value: { text: byId("compare-text").value, baseline, contender } });
+    await loadComparisons();
+  } catch (error) {
+    errorAt("compare-error", error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
 
 // First visit: a short welcome that points to the guide. Browser storage may be unavailable.
 try {

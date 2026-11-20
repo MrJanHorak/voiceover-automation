@@ -12,6 +12,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from .trained import read_config
+
 
 MAX_REFERENCE_BYTES = 16 * 1024 * 1024
 RATE = 24000  # References, Chatterbox output and recordings made before the 48 kHz master.
@@ -195,6 +197,8 @@ class DirectedEngine(ModelDetails):
         self.model_dir = model_dir
         self.model = None
         self.watermarker = None
+        self.lora_config = None  # Settings of the LoRA layers built into the loaded model, if any.
+        self.adapter = None  # Folder of the trained voice whose weights are loaded.
 
     def details(self):
         return {"engine": "VoxCPM2", "device": "cpu", "runtime": package_version("voxcpm"),
@@ -208,35 +212,63 @@ class DirectedEngine(ModelDetails):
                              "tokenizer_config.json", "tokenization_voxcpm2.py", "special_tokens_map.json")
         )
 
-    def render(self, text, reference, seed, output, instructions):
+    def render(self, text, reference, seed, output, instructions, adapter=None):
         # VoxCPM2 reads the leading parenthetical as control text. Keep its delimiters unambiguous.
         direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
-        self._generate(f"({direction}){text}", reference, seed, output)
+        self._generate(f"({direction}){text}", reference, seed, output, adapter=adapter)
 
     def render_matched(self, text, reference, seed, output, transcript):
         """Maximum resemblance: continue from the reference audio using its exact transcript."""
         self._generate(text, reference, seed, output, transcript=" ".join(transcript.split()))
 
-    def _generate(self, text, reference, seed, output, transcript=None):
+    def render_trained(self, text, reference, seed, output, adapter):
+        """Trained voice: the LoRA adapter alone (reference None) or together with the reference clip."""
+        self._generate(text, reference, seed, output, adapter=adapter)
+
+    def _load(self, adapter):
+        """Load VoxCPM2 once; build LoRA layers when a trained voice is first used, then switch them per take."""
+        from voxcpm import VoxCPM
+
+        config = read_config(adapter) if adapter is not None else None
+        if adapter is not None and config is None:
+            raise AudioError("The trained voice files are incomplete. Copy lora_config.json and lora_weights.safetensors again.")
+        if self.model is None or (config is not None and config != self.lora_config):
+            options = {}
+            if config is not None:
+                from voxcpm.model.voxcpm2 import LoRAConfig
+
+                options = {"lora_config": LoRAConfig(**config), "lora_weights_path": str(adapter)}
+            self.model = None
+            self.model = VoxCPM.from_pretrained(str(self.model_dir), device="cpu", optimize=False,
+                                                local_files_only=True, load_denoiser=False, **options)
+            self.lora_config, self.adapter = config, adapter if config is not None else None
+        elif config is not None and adapter != self.adapter:
+            self.model.load_lora(str(adapter))
+            self.adapter = adapter
+        if self.lora_config is not None:
+            self.model.set_lora_enabled(adapter is not None)
+
+    def _generate(self, text, reference, seed, output, transcript=None, adapter=None):
         if not self.available:
             raise AudioError("Start the studio with the VoxCPM2 setup described in the README.")
+        if reference is None and adapter is None:
+            raise AudioError("Choose a voice reference or a trained voice.")
         os.environ["HF_HUB_OFFLINE"] = "1"
         import numpy as np
         import perth
         import soundfile as sf
         import torch
         from scipy.signal import resample_poly
-        from voxcpm import VoxCPM
 
-        if self.model is None:
+        if self.watermarker is None:
             self.watermarker = perth.PerthImplicitWatermarker()
-            self.model = VoxCPM.from_pretrained(str(self.model_dir), device="cpu", optimize=False,
-                                                local_files_only=True, load_denoiser=False)
+        self._load(adapter)
 
         prompt = {"prompt_wav_path": str(reference), "prompt_text": transcript} if transcript else {}
+        voice = {"reference_wav_path": str(reference)} if reference is not None else {}
         with torch.inference_mode():
             torch.manual_seed(seed)
-            audio = self.model.generate(text=text, reference_wav_path=str(reference), denoise=False, **prompt)
+            audio = self.model.generate(text=text, denoise=False, **voice, **prompt)
             if not audio.size or not np.isfinite(audio).all() or not audio.any():
                 raise AudioError("The directed model returned unusable audio. Try a shorter section.")
             source_rate = self.model.tts_model.sample_rate
@@ -274,17 +306,25 @@ class CudaDirectedEngine(ModelDetails):
     def available(self):
         return self.executable.is_file() and self.model.is_file() and find_spec("perth") is not None
 
-    def render(self, text, reference, seed, output, instructions):
+    def render(self, text, reference, seed, output, instructions, adapter=None):
         direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
-        self._generate(f"({direction}){text}", reference, seed, output)
+        self._generate(f"({direction}){text}", reference, seed, output, adapter=adapter)
 
     def render_matched(self, text, reference, seed, output, transcript):
         """Maximum resemblance: audio.cpp's ultimate clone continues from the reference and its transcript."""
         self._generate(text, reference, seed, output, transcript=" ".join(transcript.split()))
 
-    def _generate(self, text, reference, seed, output, transcript=None):
+    def render_trained(self, text, reference, seed, output, adapter):
+        """Trained voice: audio.cpp merges the native LoRA folder into the model for this run."""
+        self._generate(text, reference, seed, output, adapter=adapter)
+
+    def _generate(self, text, reference, seed, output, transcript=None, adapter=None):
         if not self.available:
             raise AudioError("Set up the optional VoxCPM2 GPU files using the README, or restart with its CPU setting.")
+        if reference is None and adapter is None:
+            raise AudioError("Choose a voice reference or a trained voice.")
+        if adapter is not None and read_config(adapter) is None:
+            raise AudioError("The trained voice files are incomplete. Copy lora_config.json and lora_weights.safetensors again.")
         import numpy as np
         import perth
         import soundfile as sf
@@ -297,20 +337,24 @@ class CudaDirectedEngine(ModelDetails):
             inputs.mkdir()
             outputs.mkdir()
             (inputs / "section.txt").write_text(text, encoding="utf-8")
-            converted = folder / "reference.wav"
-            ffmpeg("-n", "-i", str(reference), "-vn", "-ac", "1", "-ar", "48000",
-                   "-c:a", "pcm_s16le", str(converted))
-            info = sf.info(converted)
-            # AudioVAE requires a capacity in blocks of 240,000 samples (five seconds at 48 kHz).
-            capacity = max(240000, math.ceil(info.frames / 240000) * 240000)
             command = [str(self.executable), "--task", "tts", "--family", "voxcpm2",
                        "--model", str(self.model), "--backend", "cuda",
                        "--session-option", "voxcpm2.mem_saver=true",
                        "--session-option", "voxcpm2.audiovae_tile_frames=128",
-                       "--session-option", f"voxcpm2.audiovae_encoder_sample_capacity={capacity}",
                        "--request-option", f"seed={seed}",
-                       "--batch-text-dir", str(inputs), "--voice-ref", str(converted),
-                       "--out-dir", str(outputs)]
+                       "--batch-text-dir", str(inputs), "--out-dir", str(outputs)]
+            if reference is not None:
+                converted = folder / "reference.wav"
+                ffmpeg("-n", "-i", str(reference), "-vn", "-ac", "1", "-ar", "48000",
+                       "-c:a", "pcm_s16le", str(converted))
+                info = sf.info(converted)
+                # AudioVAE requires a capacity in blocks of 240,000 samples (five seconds at 48 kHz).
+                capacity = max(240000, math.ceil(info.frames / 240000) * 240000)
+                command += ["--session-option", f"voxcpm2.audiovae_encoder_sample_capacity={capacity}",
+                            "--voice-ref", str(converted)]
+            if adapter is not None:
+                # A native LoRA folder (lora_config.json beside the weights), merged at session creation.
+                command += ["--session-option", f"voxcpm2.lora={Path(adapter).resolve()}"]
             if transcript:
                 # The CLI accepts the reference transcript only as an argument. It describes the
                 # owner's reference recording, not customer script text.

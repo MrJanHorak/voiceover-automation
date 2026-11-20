@@ -8,6 +8,15 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 
 ### Resume here
 
+**Status on 2026-11-20, evening:** the first trained voice (LoRA step 150) is in `data/studio/trained/step150/`. The studio can now use it ("Trained voice" section below), but it has not yet run on Windows. Next session:
+
+1. Run the tests: `.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`. The new `tests/test_trained_voice.py` has routing, GPU-command and API tests that were checked only for syntax; report any failure.
+2. Start the GPU studio (commands below) and open **Voice training** → **Compare your trained voice**. The engine should read "Trained voice: step150 · step 150".
+3. Make a few blind pairs: **Maximum resemblance** against **Trained voice · no reference**, then against **Trained voice + reference**. If audio.cpp fails with the adapter, restart with the CPU setting and compare there; the CPU path uses the library's own LoRA loading.
+4. Record the verdict in `training/TRAINED_VOICES.md`. Each adapter folder has a `VOICE.md` and `voice.json` describing its base model, data, settings and usage, which covers roadmap step 7's "record the base revision, data size, training settings and license".
+5. If step 150 loses, try step 200 or 100: copy that folder from `D:\Downloads\voice-lora-results.zip` to `data/studio/trained/` (the newest folder is used, or set `VOICEOVER_TRAINED_VOICE`).
+
+
 All code from 2026-11-19 is committed (latest code commit "add auto checks of generated text…"). This end-of-day update to `plan.md`, `README.md` and `AGENTS.md` was the only uncommitted change at handoff; run `git status` to confirm it was committed. The Whisper model for automatic checks finished downloading to `models/whisper-small.en`: `model.safetensors` is 966,992,008 bytes, matching its header.
 
 **Status on 2026-11-20:** the steps below were completed (see the 2026-11-20 session notes under the change log). What remains is listening to the redesigned studio and the pronunciation fix, then roadmap step 6.
@@ -68,6 +77,15 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
   - Checked with the mock backend and screenshots; tests for `spoken_paragraphs` added.
 
 Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
+
+### Trained voice in the studio · 2026-11-20 (roadmap step 7, implemented, not yet run on Windows)
+
+- `studio/trained.py` lists adapters under `data/studio/trained/<name>/`: folders with `lora_config.json` and `lora_weights.safetensors`, newest first, with the step from `training_state.json`. `VOICEOVER_TRAINED_VOICE` picks one by name.
+- Voice engines are now `standard`, `maximum`, `trained` (the adapter alone, no reference clip) and `trained_reference` (the adapter plus `reference_wav_path`; this is not ultimate clone, which matches how `make_samples.py` rendered the "with-reference" samples). A delivery style combines with the trained voice. Jobs record `trained_voice`, so a recording keeps the adapter it was made with; regenerating a section to a trained engine fills it in when it is empty. Section details read "VoxCPM2 · trained voice step150 (+ reference)".
+- CPU (`DirectedEngine`): the model is built once, with LoRA layers (`LoRAConfig` from the checkpoint's own config, since the library default is r=8). Then `set_lora_enabled` switches the adapter on only for trained sections, and `load_lora` swaps the weights when another adapter with the same shape is chosen.
+- GPU (`CudaDirectedEngine`): adds `--session-option voxcpm2.lora=<folder>`. audio.cpp v0.9.4's spec describes it as a "native LoRA directory … with adjacent lora_config.json; merged into generator weights at session creation". `--voice-ref` is passed only when a reference is used. Merging bf16 LoRA deltas into the Q8 GGUF has not been listened to yet.
+- Blind comparison: `POST /api/comparisons` creates a hidden job (`jobs.blind = 1`) with one sentence twice, in random engine order, with no retries. `GET /api/comparisons` reveals the engines only after `PUT /api/comparisons/{id}` saves A, B or "same". Comparisons are excluded from **Recordings**. The UI is at the bottom of **Voice training**, with a running tally.
+- Tests: `tests/test_trained_voice.py`. The discovery and store tests passed in the Linux VM, along with the rest of the store tests; the routing, GPU-command and API tests need the Windows environment.
 
 ### First LoRA training run · 2026-11-20 (roadmap step 7, trained; listening pending)
 

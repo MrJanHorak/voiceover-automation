@@ -20,7 +20,10 @@ INSTRUCTIONS_LIMIT = 240
 TRANSCRIPT_LIMIT = 1000
 WRITTEN_LIMIT = 100
 SPOKEN_LIMIT = 200
-VOICE_MATCHES = ("standard", "maximum")
+# standard: Chatterbox. maximum: VoxCPM2 ultimate clone. trained: VoxCPM2 with the trained voice (LoRA)
+# alone. trained_reference: the trained voice together with the reference clip.
+VOICE_MATCHES = ("standard", "maximum", "trained", "trained_reference")
+TRAINED_MATCHES = ("trained", "trained_reference")
 MASTER_RATE = 48000
 DEFAULT_LOUDNESS = -16.0
 LOUDNESS_TARGETS = (-14.0, -16.0, -23.0, -24.0)
@@ -92,10 +95,19 @@ def split_sentences(paragraph):
     return sentences
 
 
-def validate_voice_match(text, instructions, voice_match, available, transcript):
-    """Check a section that uses VoxCPM2 maximum resemblance instead of Chatterbox."""
+def validate_voice_match(text, instructions, voice_match, available, transcript, trained=None):
+    """Check a section that uses VoxCPM2 (maximum resemblance or a trained voice) instead of Chatterbox."""
     if voice_match not in VOICE_MATCHES:
         raise StudioError("Choose a supported voice engine.")
+    if voice_match in TRAINED_MATCHES:
+        # The trained voice also applies to sections with a delivery style.
+        if not available:
+            raise StudioError("A trained voice needs the local VoxCPM2 setup described in the README.", 409)
+        if not trained:
+            raise StudioError("Add a trained voice first. See Voice training in the guide.", 409)
+        if TURBO_SOUND_CUE.search(text):
+            raise StudioError("Remove bracketed sound cues when using a trained voice; they are read aloud by VoxCPM2.")
+        return
     if voice_match != "maximum" or instructions:
         return  # Sections with special instructions use VoxCPM2's directed mode.
     if not available:
@@ -292,6 +304,13 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN auto_retries INTEGER NOT NULL DEFAULT 0")
             if "check_requested" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN check_requested INTEGER NOT NULL DEFAULT 0")
+            if "trained_voice" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN trained_voice TEXT")
+            if "blind" not in job_columns:
+                # Blind comparisons render one sentence with two voice engines in random order.
+                db.execute("ALTER TABLE jobs ADD COLUMN blind INTEGER NOT NULL DEFAULT 0")
+            if "blind_choice" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN blind_choice TEXT")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -440,7 +459,7 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN")
             jobs = db.execute("""
-                SELECT id, title, status, created_at FROM jobs ORDER BY rowid DESC
+                SELECT id, title, status, created_at FROM jobs WHERE blind = 0 ORDER BY rowid DESC
             """).fetchall()
             voices = db.execute("SELECT * FROM voices ORDER BY rowid DESC").fetchall()
             words = db.execute("SELECT * FROM pronunciations ORDER BY written COLLATE NOCASE").fetchall()
@@ -473,7 +492,8 @@ class Store:
                 raise StudioError("Pronunciation not found.", 404)
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
-                   voice_match="standard", directed_available=False, auto_retries=0):
+                   voice_match="standard", directed_available=False, auto_retries=0, trained_voice=None,
+                   blind=False):
         if auto_retries not in (0, 1, 2):
             raise StudioError("Choose 0, 1 or 2 automatic retries.")
         sections = prepared_sections if prepared_sections is not None else [
@@ -491,17 +511,19 @@ class Store:
             for section in sections:
                 section.setdefault("voice_match", voice_match)
                 validate_voice_match(section["text"], section["instructions"], section["voice_match"],
-                                     directed_available, voice["transcript"])
-            uses_voxcpm = any(section["instructions"] or section["voice_match"] == "maximum" for section in sections)
+                                     directed_available, voice["transcript"], trained_voice)
+            uses_voxcpm = any(section["instructions"] or section["voice_match"] != "standard" for section in sections)
+            uses_trained = any(section["voice_match"] in TRAINED_MATCHES for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
-                                  master_rate, loudness_target, auto_retries)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                                  master_rate, loudness_target, auto_retries, trained_voice, blind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
-                  now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries))
+                  now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries,
+                  trained_voice if uses_trained else None, int(blind)))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
-                if section["instructions"] or section["voice_match"] == "maximum":
+                if section["instructions"] or section["voice_match"] != "standard":
                     return 35
                 selected = turbo_settings["seed"] if turbo_settings is not None else 35
                 return selected if selected else secrets.randbelow(2147483647) + 1
@@ -530,6 +552,41 @@ class Store:
             for take in takes:
                 by_section[take["section_number"]]["takes"].append(dict(take))
             return job
+
+    def comparisons(self):
+        """Blind comparisons, newest first. Which clip used which engine stays hidden until a choice is saved."""
+        with self.connect() as db:
+            db.execute("BEGIN")
+            jobs = db.execute("""
+                SELECT id, status, error, created_at, blind_choice, trained_voice FROM jobs
+                WHERE blind = 1 ORDER BY rowid DESC
+            """).fetchall()
+            result = []
+            for job in jobs:
+                sections = db.execute("""
+                    SELECT number, text, voice_match, pending, audio FROM sections WHERE job_id = ? ORDER BY number
+                """, (job["id"],)).fetchall()
+                item = {"id": job["id"], "status": job["status"], "error": job["error"], "created_at": job["created_at"],
+                        "text": sections[0]["text"] if sections else "", "choice": job["blind_choice"],
+                        "ready": job["status"] == "ready" and all(section["audio"] for section in sections)}
+                if job["blind_choice"]:
+                    item["engines"] = {"A": sections[0]["voice_match"], "B": sections[1]["voice_match"]}
+                    item["trained_voice"] = job["trained_voice"]
+                result.append(item)
+            return result
+
+    def choose_blind(self, job_id, choice):
+        if choice not in ("A", "B", "same"):
+            raise StudioError("Choose A, B or no difference.")
+        with self.connect() as db:
+            job = db.execute("SELECT blind, status, blind_choice FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if job is None or not job["blind"]:
+                raise StudioError("Comparison not found.", 404)
+            if job["status"] != "ready":
+                raise StudioError("Wait for both clips to finish.", 409)
+            if job["blind_choice"]:
+                raise StudioError("This comparison already has a choice.", 409)
+            db.execute("UPDATE jobs SET blind_choice = ? WHERE id = ?", (choice, job_id))
 
     @staticmethod
     def get_job(db, job_id):
@@ -668,7 +725,7 @@ class Store:
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def regenerate(self, job_id, number, text, instructions=None, directed_available=False, turbo_settings=None,
-                   voice_match=None):
+                   voice_match=None, trained_voice=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             job = self.get_job(db, job_id)
@@ -682,11 +739,16 @@ class Store:
             voice_match = section["voice_match"] if voice_match is None else voice_match
             validate_directions(text, instructions, directed_available)
             voice = db.execute("SELECT transcript FROM voices WHERE id = ?", (job["voice_id"],)).fetchone()
-            validate_voice_match(text, instructions, voice_match, directed_available, voice["transcript"] if voice else "")
+            # A recording keeps the trained voice it was made with; the current one fills in when it has none.
+            trained = job["trained_voice"] or trained_voice
+            validate_voice_match(text, instructions, voice_match, directed_available, voice["transcript"] if voice else "",
+                                 trained)
+            if voice_match in TRAINED_MATCHES and not job["trained_voice"]:
+                db.execute("UPDATE jobs SET trained_voice = ? WHERE id = ?", (trained, job_id))
             if turbo_settings is None and section["turbo_settings"]:
                 turbo_settings = json.loads(section["turbo_settings"])
                 turbo_settings["seed"] = 0
-            seed = turbo_settings["seed"] if turbo_settings and not instructions and voice_match != "maximum" else 0
+            seed = turbo_settings["seed"] if turbo_settings and not instructions and voice_match == "standard" else 0
             seed = seed if seed else secrets.randbelow(2147483647) + 1
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             db.execute("""

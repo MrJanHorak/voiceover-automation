@@ -13,7 +13,8 @@
 </head>
 <body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}"
       data-directed-available="{{ 'true' if directed_available else 'false' }}"
-      data-checks-available="{{ 'true' if checks_available else 'false' }}">
+      data-checks-available="{{ 'true' if checks_available else 'false' }}"
+      data-trained-voice="{{ trained_voice.name if trained_voice and directed_available else '' }}">
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
@@ -341,6 +342,38 @@
           </section>
         </div>
       </div>
+
+      <section class="panel compare-panel" id="compare-panel" aria-labelledby="compare-heading">
+        <div class="panel-heading">
+          <h2 id="compare-heading">Compare your trained voice {{ tip("Renders the same sentence with two voice engines in random order. Listen to both, pick the one that sounds more like you, and only then see which was which. A few rounds with different sentences tell you whether the trained voice is worth using.") }}</h2>
+          <span class="muted" id="compare-voice"></span>
+        </div>
+        <div class="compare-form">
+          <div class="compare-text">
+            <label for="compare-text">Sentence</label>
+            <textarea id="compare-text" rows="2" maxlength="{{ chunk_limit }}">Thanks for calling. Our team will get back to you within one business day.</textarea>
+          </div>
+          <div>
+            <label for="compare-baseline">Compare</label>
+            <select id="compare-baseline">
+              <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance</option>
+              <option value="standard">Chatterbox Turbo</option>
+              <option value="trained_reference">Trained voice + reference</option>
+            </select>
+          </div>
+          <div>
+            <label for="compare-contender">with</label>
+            <select id="compare-contender">
+              <option value="trained">Trained voice · no reference</option>
+              <option value="trained_reference">Trained voice + reference</option>
+            </select>
+          </div>
+          <button type="button" class="button button-primary" id="compare-start">Make a blind pair</button>
+        </div>
+        <p id="compare-error" class="error" role="alert" hidden></p>
+        <p id="compare-tally" class="muted"></p>
+        <ol id="compare-list" class="compare-list"></ol>
+      </section>
     </section>
 
     <!-- Guide: how the studio works, for first-time use. -->
@@ -358,7 +391,7 @@
         <li class="panel">
           <span class="step-number">2</span>
           <h2>Settings</h2>
-          <p>Choose the <strong>voice engine</strong>: Chatterbox Turbo is fast; Maximum resemblance sounds most like you but takes longer.</p>
+          <p>Choose the <strong>voice engine</strong>: Chatterbox Turbo is fast; Maximum resemblance sounds most like you but takes longer. Once you have trained your voice, <strong>Trained voice</strong> speaks with it, with or without your reference clip.</p>
           <p>Optionally add a <strong>delivery style</strong>, such as "warm, conversational narrator", for the whole script or per paragraph. Then select <strong>Generate voice-over</strong>.</p>
         </li>
         <li class="panel">
@@ -444,13 +477,19 @@
     <div class="instructions-control">
       <div class="label-row">
         <label for="">Voice engine</label>
-        {{ tip("Chatterbox Turbo is fast and supports sound cues such as [laugh]. Maximum resemblance uses VoxCPM2 with your reference and its transcript: it sounds most like you but is slower, and sound cues are not available. Sections with a delivery style always use VoxCPM2's directed mode.") }}
+        {{ tip("Chatterbox Turbo is fast and supports sound cues such as [laugh]. Maximum resemblance uses VoxCPM2 with your reference and its transcript: it sounds most like you but is slower. Trained voice uses VoxCPM2 with the voice you trained on a rented GPU, without a reference clip; Trained voice + reference adds your reference clip as well. Sound cues work only with Chatterbox. A delivery style uses VoxCPM2's directed mode, with the trained voice when one is chosen.") }}
       </div>
       <select>
         <option value="standard">Chatterbox Turbo · fast</option>
         <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance · sounds most like you</option>
+        {% if trained_voice and directed_available %}
+        <option value="trained">Trained voice · {{ trained_voice.name }} · no reference</option>
+        <option value="trained_reference">Trained voice {{ trained_voice.name }} + reference</option>
+        {% else %}
+        <option value="trained" disabled>Trained voice · none added yet</option>
+        {% endif %}
       </select>
-      {% if not directed_available %}<p class="muted instructions-hint">Set up local VoxCPM2 to use maximum resemblance. See the README.</p>{% endif %}
+      {% if not directed_available %}<p class="muted instructions-hint">Set up local VoxCPM2 to use maximum resemblance or a trained voice. See the README.</p>{% endif %}
     </div>
   </template>
   <template id="delivery-instructions">

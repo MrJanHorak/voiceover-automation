@@ -25,7 +25,8 @@ from .dataset import GOALS_MINUTES, MAX_TAKE_BYTES, MAX_TAKE_SECONDS, MIN_TAKE_S
 from .normalize import spoken_paragraphs, spoken_text
 from .quality import QualityChecker, expected_text, score as quality_score
 from .settings import TurboSettings
-from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
+from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRAINED_MATCHES, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
+from .trained import find_trained
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -33,8 +34,9 @@ PACKAGE = Path(__file__).parent
 LOG = logging.getLogger(__name__)
 Directions = Annotated[str, StringConstraints(strip_whitespace=True, max_length=INSTRUCTIONS_LIMIT)]
 PromptId = Annotated[str, PathParam(pattern=r"^[bc][0-9a-f]{15}$")]
-# Engine for sections without special instructions: Chatterbox, or VoxCPM2 maximum resemblance.
-VoiceMatch = Literal["standard", "maximum"]
+# Engine for a section: Chatterbox, VoxCPM2 maximum resemblance, or VoxCPM2 with the trained voice
+# alone or together with the reference clip.
+VoiceMatch = Literal["standard", "maximum", "trained", "trained_reference"]
 
 
 class SectionInput(BaseModel):
@@ -77,6 +79,16 @@ class JobInput(BaseModel):
     auto_retries: Literal[0, 1, 2] = 1
 
 
+class ComparisonInput(BaseModel):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
+    baseline: VoiceMatch = "maximum"
+    contender: VoiceMatch = "trained"
+
+
+class ChoiceInput(BaseModel):
+    choice: Literal["A", "B", "same"]
+
+
 class PreviewInput(BaseModel):
     script: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=SCRIPT_LIMIT)]
 
@@ -115,19 +127,37 @@ def install_voice(store, source, label):
         raise
 
 
+def trained_adapter(store, job):
+    """Folder of the trained voice a recording uses; it must still be in data/studio/trained."""
+    voice = find_trained(store.root / "trained", job.get("trained_voice")) if job.get("trained_voice") else None
+    if voice is None:
+        raise AudioError(f"The trained voice \"{job.get('trained_voice') or ''}\" is missing from data/studio/trained. "
+                         "Copy it back, or choose another voice engine for these sections.")
+    return voice["path"]
+
+
 def render_attempt(store, engine, directed, job, section, folder, reference, spoken, seed):
     """Generate one take of a section, record it and return its filename."""
     job_id = job["id"]
     filename = f"section-{section['number']}-{new_id()}.wav"
     try:
         arguments = (spoken, reference, seed, folder / filename)
-        matched = not section["instructions"] and section.get("voice_match") == "maximum"
-        if section["instructions"] or matched:
+        mode = section.get("voice_match")
+        trained = mode in TRAINED_MATCHES
+        matched = not section["instructions"] and mode == "maximum"
+        if section["instructions"] or matched or trained:
             if getattr(directed, "needs_exclusive_gpu", False):
                 release = getattr(engine, "release", None)
                 if release:
                     release()
-            if matched:
+            if trained:
+                adapter = trained_adapter(store, job)
+                voice = reference if mode == "trained_reference" else None
+                if section["instructions"]:
+                    directed.render(spoken, voice, seed, folder / filename, section["instructions"], adapter=adapter)
+                else:
+                    directed.render_trained(spoken, voice, seed, folder / filename, adapter)
+            elif matched:
                 directed.render_matched(*arguments, job.get("voice_transcript") or "")
             else:
                 directed.render(*arguments, section["instructions"])
@@ -147,6 +177,9 @@ def render_attempt(store, engine, directed, job, section, folder, reference, spo
                 LOG.warning("Could not record model details (%s)", type(error).__name__)
         if details and matched and details.get("engine"):
             details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
+        elif details and trained and details.get("engine"):
+            extra = " + reference" if mode == "trained_reference" else ""
+            details = {**details, "engine": f"{details['engine']} · trained voice {job.get('trained_voice')}{extra}"}
         store.finish_section(job_id, section["number"], filename, details, seed, spoken)
     except Exception:
         (folder / filename).unlink(missing_ok=True)
@@ -189,7 +222,7 @@ def render_job(store, engine, directed, stop, job_id, checker=None):
     pending = [section for section in job["sections"] if section["pending"]]
     if getattr(directed, "needs_exclusive_gpu", False):
         # Render Chatterbox sections first so the shared 4 GB GPU switches engines only once.
-        pending.sort(key=lambda section: bool(section["instructions"]) or section.get("voice_match") == "maximum")
+        pending.sort(key=lambda section: bool(section["instructions"]) or section.get("voice_match", "standard") != "standard")
     for section in pending:
         # Models receive normalized words; the section keeps the text as written.
         spoken = spoken_text(section["text"], pairs)
@@ -278,6 +311,11 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         checker = QualityChecker(Path(os.environ.get("VOICEOVER_ASR_DIR", PROJECT / "models" / "whisper-small.en")),
                                  PROJECT / "models" / "chatterbox-turbo" / "ve.safetensors")
 
+    def current_trained():
+        """The trained voice new sections use: VOICEOVER_TRAINED_VOICE, or else the newest one."""
+        voice = find_trained(store.root / "trained", os.environ.get("VOICEOVER_TRAINED_VOICE") or None)
+        return {"name": voice["name"], "step": voice["step"]} if voice else None
+
     @asynccontextmanager
     async def lifespan(app):
         store.root.mkdir(parents=True, exist_ok=True)
@@ -334,6 +372,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             "device": device, "directed_device": directed_device,
             "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
             "transcript_limit": TRANSCRIPT_LIMIT, "checks_available": checker.available,
+            "trained_voice": current_trained(),
         })
 
     @app.get("/assets/{asset}")
@@ -343,7 +382,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
 
     @app.get("/api/state")
     def state():
-        return {**store.state(), "reference_notice": app.state.reference_notice}
+        return {**store.state(), "reference_notice": app.state.reference_notice, "trained_voice": current_trained()}
 
     @app.post("/api/scripts/import", dependencies=mutations)
     def import_script(file: Annotated[UploadFile, File()]):
@@ -539,8 +578,34 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             validate_directions(data.script, data.instructions, directed.available)
             script = data.script
         settings = data.turbo_settings.model_dump() if data.turbo_settings else None
+        trained = current_trained()
         return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings,
-                                       data.voice_match, directed.available, data.auto_retries)}
+                                       data.voice_match, directed.available, data.auto_retries,
+                                       trained["name"] if trained else None)}
+
+    @app.get("/api/comparisons")
+    def comparisons():
+        return {"comparisons": store.comparisons(), "trained_voice": current_trained()}
+
+    @app.post("/api/comparisons", dependencies=mutations, status_code=202)
+    def create_comparison(data: ComparisonInput):
+        if data.baseline == data.contender:
+            raise StudioError("Choose two different voice engines to compare.")
+        # Random order, so the owner cannot tell which clip is which until choosing.
+        order = [data.baseline, data.contender]
+        if secrets.randbelow(2):
+            order.reverse()
+        prepared = [{"text": data.text, "instructions": "", "pause_ms": PARAGRAPH_PAUSE_MS, "voice_match": match}
+                    for match in order]
+        trained = current_trained()
+        return {"id": store.create_job("Blind comparison", f"{data.text}\n\n{data.text}", "", prepared, None,
+                                       data.baseline, directed.available, 0,
+                                       trained["name"] if trained else None, blind=True)}
+
+    @app.put("/api/comparisons/{job_id}", dependencies=mutations)
+    def choose_comparison(job_id: UUID, data: ChoiceInput):
+        store.choose_blind(job_id.hex, data.choice)
+        return {"comparisons": store.comparisons()}
 
     @app.post("/api/sections/preview", dependencies=mutations)
     def preview_sections(data: PreviewInput):
@@ -555,6 +620,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
             "voice_reference": job["voice_label"],
             "voice_transcript_ready": bool(job["voice_transcript"]),
+            "trained_voice": job["trained_voice"],
             "master_rate": job["master_rate"], "loudness_target": job["loudness_target"],
             "export_loudness": json.loads(job["export_loudness"]) if job["export_loudness"] else None,
             "auto_retries": job["auto_retries"], "checks_available": checker.available,
@@ -578,7 +644,9 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput):
         settings = data.turbo_settings.model_dump() if data.turbo_settings else None
-        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings, data.voice_match)
+        trained = current_trained()
+        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings, data.voice_match,
+                         trained["name"] if trained else None)
         return {"id": job_id.hex}
 
     @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)
