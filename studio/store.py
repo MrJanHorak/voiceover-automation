@@ -311,6 +311,14 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN blind INTEGER NOT NULL DEFAULT 0")
             if "blind_choice" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN blind_choice TEXT")
+            if "source" not in job_columns:
+                # studio: made in the browser. inbox: a file dropped in the intake folder. api: sent by another app.
+                db.execute("ALTER TABLE jobs ADD COLUMN source TEXT NOT NULL DEFAULT 'studio'")
+            if "approved_export" not in job_columns:
+                # The export the owner approved; a later regeneration makes a new export that needs approval again.
+                db.execute("ALTER TABLE jobs ADD COLUMN approved_export TEXT")
+            if "delivered" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN delivered TEXT")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -459,7 +467,10 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN")
             jobs = db.execute("""
-                SELECT id, title, status, created_at FROM jobs WHERE blind = 0 ORDER BY rowid DESC
+                SELECT id, title, status, created_at, source,
+                       CASE WHEN source != 'studio' AND status = 'ready' AND export IS NOT NULL
+                            AND (approved_export IS NULL OR approved_export != export) THEN 1 ELSE 0 END AS awaiting_approval
+                FROM jobs WHERE blind = 0 ORDER BY rowid DESC
             """).fetchall()
             voices = db.execute("SELECT * FROM voices ORDER BY rowid DESC").fetchall()
             words = db.execute("SELECT * FROM pronunciations ORDER BY written COLLATE NOCASE").fetchall()
@@ -493,7 +504,7 @@ class Store:
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
                    voice_match="standard", directed_available=False, auto_retries=0, trained_voice=None,
-                   blind=False):
+                   blind=False, source="studio"):
         if auto_retries not in (0, 1, 2):
             raise StudioError("Choose 0, 1 or 2 automatic retries.")
         sections = prepared_sections if prepared_sections is not None else [
@@ -516,11 +527,11 @@ class Store:
             uses_trained = any(section["voice_match"] in TRAINED_MATCHES for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
-                                  master_rate, loudness_target, auto_retries, trained_voice, blind)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                                  master_rate, loudness_target, auto_retries, trained_voice, blind, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
                   now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries,
-                  trained_voice if uses_trained else None, int(blind)))
+                  trained_voice if uses_trained else None, int(blind), source))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
                 if section["instructions"] or section["voice_match"] != "standard":
@@ -705,6 +716,18 @@ class Store:
             if job["loudness_target"] == target:
                 return
             db.execute("UPDATE jobs SET loudness_target = ?, status = 'queued', error = NULL WHERE id = ?", (target, job_id))
+
+    def approve(self, job_id, export, delivered):
+        """Mark an export as approved and record the delivered file names; it must still be the current one."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            job = self.get_job(db, job_id)
+            if job["status"] != "ready" or not job["export"]:
+                raise StudioError("Wait for the recording to finish before approving it.", 409)
+            if job["export"] != export:
+                raise StudioError("The recording changed while it was being delivered. Approve it again.", 409)
+            db.execute("UPDATE jobs SET approved_export = ?, delivered = ? WHERE id = ?",
+                       (export, json.dumps({"files": delivered, "at": now()}), job_id))
 
     def fail_job(self, job_id, error):
         with self.connect() as db:

@@ -152,6 +152,31 @@ A trained voice is a small LoRA adapter (about 70 MB) trained on your recordings
 
 **Compare your trained voice**, at the bottom of **Voice training**, renders one sentence with two engines in random order. Listen to clips A and B, choose the one that sounds more like you (or **Can't tell**), and only then see which was which. Your picks are tallied, so a few rounds with different sentences show whether the trained voice beats maximum resemblance or Chatterbox. Comparisons do not appear under **Recordings**.
 
+### Hands-off intake and the local API
+
+**Inbox folder.** While the studio runs, it watches `data\studio\inbox\` (set `VOICEOVER_INBOX` to use another folder, or `off` to disable it):
+
+1. Drop a `.txt`, `.docx` or `.pdf` script into the folder. The file name becomes the title (`Spring_promo.txt` → "Spring promo").
+2. Within a few seconds, once the file has stopped changing, the studio queues a recording with the best available setup. That is **Trained voice + reference** when a trained voice is present, otherwise maximum resemblance when the reference has a transcript, otherwise Chatterbox. It uses automatic checks and one retry.
+3. The script moves to `inbox\done\`. If it cannot be recorded (for example, an empty file, a scanned PDF or sound cues with a VoxCPM2 engine), it moves to `inbox\failed\` with a `.why.txt` note.
+4. The recording appears under **Recordings** with an **Approve** tag. Listen, fix sections if needed, then select **Approve and send to outbox**. The WAV and MP3 are copied to `data\studio\outbox\` (or `VOICEOVER_OUTBOX`) as "Title YYYY-MM-DD.wav/.mp3". Regenerating a section afterwards makes a new version that needs approval again.
+
+Any recording can be sent to the outbox with **Send to outbox**. Nothing is delivered automatically.
+
+**Local API.** Other programs on this computer can do the same over HTTP. The studio accepts requests only from `127.0.0.1` or `localhost`, and changes need the header `X-Studio-Request: 1`.
+
+```powershell
+# Send a script file (PowerShell 7, or use curl.exe in Windows PowerShell)
+curl.exe -H "X-Studio-Request: 1" -F "file=@Spring promo.txt" -F "title=Spring promo" http://127.0.0.1:8000/api/intake
+# → {"id": "<recording id>"}
+
+curl.exe http://127.0.0.1:8000/api/jobs/<id>                       # status: queued, running, ready or failed
+curl.exe -H "X-Studio-Request: 1" -X POST http://127.0.0.1:8000/api/jobs/<id>/approve   # copy to the outbox
+curl.exe -o out.wav "http://127.0.0.1:8000/api/jobs/<id>/export/wav?download=true"     # or download directly
+```
+
+`POST /api/jobs` with JSON (`{"script": "...", "voice_match": "trained_reference"}`) creates a recording with explicit settings, like the browser does. API recordings are marked "From the local API" and await approval like inbox recordings. Keep the studio bound to `127.0.0.1`; it has no login.
+
 ### Advanced Chatterbox settings
 
 Open **Advanced Chatterbox settings** on the **Settings** step to adjust seed, temperature, Top P, Top K, repetition penalty, and reference loudness normalization. Select the question mark beside a control for an explanation. These settings apply to Chatterbox sections; sections with special instructions use VoxCPM2 instead. Open a completed section to change its settings when regenerating; the settings and actual seed for new takes appear in **All takes**. The initial seed defaults to `35` to preserve the studio's previous behavior; `0` selects a new random seed, and regeneration starts with `0` for variety. Using a fixed seed can help repeat a take, but results can vary across devices or runtime versions.

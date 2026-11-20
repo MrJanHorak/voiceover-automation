@@ -26,6 +26,7 @@ from .normalize import spoken_paragraphs, spoken_text
 from .quality import QualityChecker, expected_text, score as quality_score
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRAINED_MATCHES, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
+from .inbox import SCAN_SECONDS, Inbox, unique
 from .trained import find_trained
 
 
@@ -275,6 +276,18 @@ def worker(store, engine, directed, stop, checker=None):
             store.fail_job(job_id, "Generation could not finish. Check the reference and model setup, then retry.")
 
 
+def inbox_worker(inbox, stop):
+    while not stop.wait(SCAN_SECONDS):
+        try:
+            inbox.scan()
+        except Exception as error:
+            LOG.error("Inbox scan failed (%s)", type(error).__name__)
+
+
+def safe_name(title):
+    return "".join(character if character.isalnum() or character in " -_" else "_" for character in title).strip() or "recording"
+
+
 def file_response(path, media_type, filename=None):
     if not path.is_file():
         raise StudioError("This audio file could not be found.", 404)
@@ -311,6 +324,24 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         checker = QualityChecker(Path(os.environ.get("VOICEOVER_ASR_DIR", PROJECT / "models" / "whisper-small.en")),
                                  PROJECT / "models" / "chatterbox-turbo" / "ve.safetensors")
 
+    inbox_dir = Path(os.environ.get("VOICEOVER_INBOX") or store.root / "inbox")
+    outbox_dir = Path(os.environ.get("VOICEOVER_OUTBOX") or store.root / "outbox")
+
+    def intake_job(title, script, source="inbox"):
+        """Hands-off recording with the owner's preferred setup: trained voice + reference when available."""
+        trained = current_trained()
+        voice = store.active_voice()
+        if trained and directed.available:
+            match = "trained_reference"
+        elif directed.available and voice and voice["transcript"]:
+            match = "maximum"
+        else:
+            match = "standard"
+        return store.create_job(title, script, "", None, None, match, directed.available,
+                                1 if checker.available else 0, trained["name"] if trained else None, source=source)
+
+    inbox = Inbox(inbox_dir, intake_job)
+
     def current_trained():
         """The trained voice new sections use: VOICEOVER_TRAINED_VOICE, or else the newest one."""
         voice = find_trained(store.root / "trained", os.environ.get("VOICEOVER_TRAINED_VOICE") or None)
@@ -334,11 +365,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             model = engine if engine is not None else TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
             thread = Thread(target=worker, args=(store, model, directed, stop, checker), name="voiceover-worker", daemon=True)
             thread.start()
+            intake = None
+            if os.environ.get("VOICEOVER_INBOX", "").lower() != "off":
+                inbox.prepare()
+                outbox_dir.mkdir(parents=True, exist_ok=True)
+                intake = Thread(target=inbox_worker, args=(inbox, stop), name="voiceover-inbox", daemon=True)
+                intake.start()
             try:
                 yield
             finally:
                 stop.set()
                 thread.join()
+                if intake:
+                    intake.join()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -373,6 +412,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
             "transcript_limit": TRANSCRIPT_LIMIT, "checks_available": checker.available,
             "trained_voice": current_trained(),
+            "inbox": str(inbox_dir), "outbox": str(outbox_dir),
         })
 
     @app.get("/assets/{asset}")
@@ -621,6 +661,9 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             "voice_reference": job["voice_label"],
             "voice_transcript_ready": bool(job["voice_transcript"]),
             "trained_voice": job["trained_voice"],
+            "source": job["source"],
+            "approved": bool(job["export"]) and job["approved_export"] == job["export"],
+            "delivered": json.loads(job["delivered"]) if job["delivered"] else None,
             "master_rate": job["master_rate"], "loudness_target": job["loudness_target"],
             "export_loudness": json.loads(job["export_loudness"]) if job["export_loudness"] else None,
             "auto_retries": job["auto_retries"], "checks_available": checker.available,
@@ -706,10 +749,43 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         if not job["export"]:
             raise StudioError("This recording has no export yet.", 404)
         media_type = "audio/wav" if kind == "wav" else "audio/mpeg"
-        safe_title = "".join(character if character.isalnum() or character in " -_" else "_"
-                             for character in job["title"]).strip() or "recording"
+        safe_title = safe_name(job["title"])
         return file_response(store.recordings / job_id.hex / f"{job['export']}.{kind}", media_type,
                              f"{safe_title}.{kind}" if download else None)
+
+    @app.post("/api/jobs/{job_id}/approve", dependencies=mutations)
+    def approve(job_id: UUID):
+        """Approve the current export and copy its WAV and MP3 to the outbox folder."""
+        job = store.job(job_id.hex)
+        if job["status"] != "ready" or not job["export"]:
+            raise StudioError("Wait for the recording to finish before approving it.", 409)
+        folder = store.recordings / job_id.hex
+        sources = [folder / f"{job['export']}.{kind}" for kind in ("wav", "mp3")]
+        if not all(path.is_file() for path in sources):
+            raise StudioError("This recording's files could not be found.", 404)
+        outbox_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{safe_name(job['title'])} {datetime.now().strftime('%Y-%m-%d')}"
+        delivered = []
+        try:
+            for path in sources:
+                target = unique(outbox_dir, f"{stem}{path.suffix}")
+                shutil.copyfile(path, target)
+                delivered.append(target)
+            store.approve(job_id.hex, job["export"], [target.name for target in delivered])
+        except Exception:
+            for target in delivered:
+                target.unlink(missing_ok=True)
+            raise
+        return {"delivered": [target.name for target in delivered], "outbox": str(outbox_dir)}
+
+    @app.post("/api/intake", dependencies=mutations, status_code=202)
+    def intake_file(file: Annotated[UploadFile, File()],
+                    title: Annotated[str, Form(), StringConstraints(strip_whitespace=True, max_length=100)] = ""):
+        """For other apps on this computer: a script file becomes a recording awaiting approval."""
+        contents = file.file.read(MAX_SCRIPT_FILE_BYTES + 1)
+        script = extract_script(file.filename or "", contents)["text"]
+        name = title or Path(file.filename or "").stem[:100] or "API recording"
+        return {"id": intake_job(name, script, source="api")}
 
     @app.delete("/api/jobs/{job_id}", dependencies=mutations, status_code=204)
     def delete_job(job_id: UUID):

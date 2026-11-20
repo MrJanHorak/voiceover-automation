@@ -8,6 +8,14 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 
 ### Resume here
 
+**Status on 2026-11-20, late evening:** the owner's blind comparisons favored **Trained voice + reference** (step150), with Maximum resemblance a close second. It is now the default engine when a trained voice is present (roadmap step 7 done). Roadmap step 8, hands-off intake, is implemented but has not yet run on Windows (see "Hands-off intake" below). Next session:
+
+1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`). New: `tests/test_intake.py`, `tests/test_trained_voice.py`.
+2. Start the studio, drop a short `.txt` script into `data\studio\inbox\`, wait for it under **Recordings** (tag **Approve**), listen, then **Approve and send to outbox** and check `data\studio\outbox\`.
+3. Optionally send one through the local API with the `curl.exe` lines in the README.
+4. Then, toward self-hosting: decide the target machine, add authentication before exposing anything beyond `127.0.0.1`, and back up the database, references, trained voices and `voice-lora-results.zip`.
+
+
 **Status on 2026-11-20, evening:** the first trained voice (LoRA step 150) is in `data/studio/trained/step150/`. The studio can now use it ("Trained voice" section below), but it has not yet run on Windows. Next session:
 
 1. Run the tests: `.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`. The new `tests/test_trained_voice.py` has routing, GPU-command and API tests that were checked only for syntax; report any failure.
@@ -77,6 +85,14 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
   - Checked with the mock backend and screenshots; tests for `spoken_paragraphs` added.
 
 Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
+
+### Hands-off intake · 2026-11-20 (roadmap step 8, implemented, not yet run on Windows)
+
+- `studio/inbox.py`: scans `data/studio/inbox/` every 3 seconds (`VOICEOVER_INBOX`, or `off`). A file is processed once its size and modification time are unchanged between two scans. Hidden files, Office `~$` lock files and partial downloads are skipped. Accepted: `.txt`, `.docx` and `.pdf`, through the existing `extract_script`. Successes move to `done/`; failures move to `failed/` with a `.why.txt`. Nothing is deleted, and a file that cannot be moved is never submitted twice.
+- Intake recordings use the best available engine (trained_reference, then maximum, then standard), automatic checks and one retry. `jobs.source` is `studio`, `inbox` or `api`.
+- Approval: `jobs.approved_export` holds the export the owner approved, so a regenerated export needs approval again. The history shows an **Approve** tag for non-studio recordings awaiting approval. `POST /api/jobs/{id}/approve` copies the current WAV and MP3 to `data/studio/outbox/` (`VOICEOVER_OUTBOX`) without overwriting, then records the file names in `jobs.delivered`. Studio recordings can use **Send to outbox** too.
+- Local API: `POST /api/intake` (multipart `file`, optional `title`) creates an `api` recording; status, export download and approval use the existing routes. It is loopback-only with the `X-Studio-Request` header, as before; there is no authentication, so it must not be exposed beyond `127.0.0.1`.
+- Tests: `tests/test_intake.py`. The watcher and approval-store tests passed in the Linux VM; the API test needs the Windows environment.
 
 ### Trained voice in the studio · 2026-11-20 (roadmap step 7, implemented, not yet run on Windows)
 
@@ -281,8 +297,8 @@ Work in this order. Each step should be heard and compared with the previous bes
 4. **Implemented, pending listening: delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
 5. **Implemented, first run pending: automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
 6. **Implemented, not yet used: fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
-7. **Fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.
-8. **Hands-off intake.** A watched folder or local API turns a script file into a checked WAV and MP3 for owner approval. Customer access and billing remain Phase 2.
+7. **Done (step150 LoRA; Trained voice + reference won the blind comparison; Chatterbox fine-tune deferred): fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.
+8. **Implemented, first run pending: hands-off intake.** A watched folder or local API turns a script file into a checked WAV and MP3 for owner approval. Customer access and billing remain Phase 2.
 
 Avoid engines whose weights are licensed for noncommercial use only, such as XTTS-v2, F5-TTS and the Fish/OpenAudio releases, for paid work.
 

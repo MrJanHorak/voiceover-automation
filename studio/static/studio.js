@@ -765,6 +765,7 @@ function renderHistory() {
     const status = element("span", "status");
     badge(status, entry.status);
     open.append(element("span", "history-name", entry.title), status);
+    if (entry.awaiting_approval) open.append(element("span", "approval-tag", "Approve"));
     row.append(open);
     const remove = element("button", "button button-quiet remove-job", "×");
     remove.type = "button";
@@ -1169,6 +1170,15 @@ function renderJob(entry) {
   byId("check-recording").hidden = !(entry?.checks_available && entry?.status === "ready");
   byId("reuse-script").hidden = !entry;
   byId("check-recording").disabled = false;
+  const deliverable = entry?.status === "ready" && Boolean(entry?.export);
+  byId("approval").hidden = !deliverable;
+  byId("approve").hidden = !deliverable || entry.approved;
+  byId("approve").disabled = false;
+  byId("approve").textContent = entry?.source === "studio" ? "Send to outbox" : "Approve and send to outbox";
+  byId("approval-note").textContent = !deliverable ? ""
+    : entry.approved ? `Approved · in the outbox as ${(entry.delivered?.files || []).join(" and ")}`
+    : entry.source !== "studio" ? `From the ${entry.source === "api" ? "local API" : "inbox"} · listen, then approve to deliver.`
+    : "";
   errorAt("result-error", entry?.error);
   if (!entry) {
     message.textContent = "Generate a voice-over to play and download it here.";
@@ -1255,7 +1265,8 @@ async function refresh() {
 
 const scriptSounds = cuePicker(script, "script-error");
 const scriptDirections = instructionsEditor("recording-instructions", "");
-const scriptEngine = voiceMatchEditor("recording-engine", "standard");
+// The owner's blind comparisons (2026-11-20) preferred the trained voice with the reference clip.
+const scriptEngine = voiceMatchEditor("recording-engine", trainedVoice ? "trained_reference" : "standard");
 const scriptAdvanced = advancedEditor("script-advanced-setting", turboDefaults, updateEditor);
 byId("script-cue").append(scriptSounds);
 byId("script-engine").append(scriptEngine.box);
@@ -1403,6 +1414,19 @@ byId("balance").addEventListener("click", async (event) => {
   try {
     await change(`/api/jobs/${id}/balance`);
     await refreshJob();
+  } catch (error) {
+    errorAt("result-error", error.message);
+    event.target.disabled = false;
+  }
+});
+
+byId("approve").addEventListener("click", async (event) => {
+  const id = selected;
+  event.target.disabled = true;
+  try {
+    await change(`/api/jobs/${id}/approve`);
+    await refreshJob();
+    await refresh();
   } catch (error) {
     errorAt("result-error", error.message);
     event.target.disabled = false;

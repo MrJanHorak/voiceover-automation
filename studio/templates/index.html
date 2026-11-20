@@ -174,6 +174,11 @@
                 </div>
               </div>
               <p class="muted instructions-hint" id="loudness-result"></p>
+              <div class="approval-row" id="approval" hidden>
+                <button class="button button-primary" id="approve" type="button">Approve and send to outbox</button>
+                {{ tip("Copies the finished WAV and MP3 to the outbox folder (" ~ outbox ~ ") so you can deliver them. Recordings made from the inbox wait here for your approval. If you regenerate a section later, the new version needs approval again.") }}
+                <span class="muted" id="approval-note" role="status"></span>
+              </div>
             </div>
             <div class="form-footer">
               <button class="button button-quiet" id="retry" type="button" hidden>Retry generation</button>
@@ -433,6 +438,15 @@
             <li>Under <strong>Voice training</strong>, read short prompts aloud; each take is checked for the right words, clipping and noise.</li>
             <li>Aim for 30 minutes of kept recordings, in several short sessions. Add your own scripts for the best results.</li>
             <li><strong>Export training set</strong> creates the folder used to train a version of the model on your voice.</li>
+            <li>Once trained, <strong>Compare your trained voice</strong> lets you judge it blind against the other engines.</li>
+          </ul>
+        </section>
+        <section class="panel">
+          <h2>Hands-off recordings</h2>
+          <ul>
+            <li>Drop a .txt, .docx or .pdf script into the inbox folder: <code>{{ inbox }}</code>. The studio records it with your best voice setup and automatic checks.</li>
+            <li>The script moves to <code>done</code>, or to <code>failed</code> with a note saying why.</li>
+            <li>The recording appears under <strong>Recordings</strong> marked <strong>Approve</strong>. Listen, fix any section, then select <strong>Approve and send to outbox</strong>: <code>{{ outbox }}</code>.</li>
           </ul>
         </section>
         <section class="panel">

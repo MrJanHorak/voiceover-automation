@@ -6,7 +6,7 @@ This file records every adapter trained from the owner's recordings, and how to 
 
 | Name | Date | Base model | Data | Settings | Checkpoint | Validation loss (total / diff) | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| step150 | 2026-11-20 | VoxCPM2 `7936080b`, voxcpm 2.0.3 | Export `2026-11-20_154735`: 184 clips, 19.6 min | `voxcpm2_lora.yaml`: r=32, alpha=32, lr 1e-4, 300 steps | 150 of 300 | 0.887 / 0.756 | Pending blind comparison |
+| step150 | 2026-11-20 | VoxCPM2 `7936080b`, voxcpm 2.0.3 | Export `2026-11-20_154735`: 184 clips, 19.6 min | `voxcpm2_lora.yaml`: r=32, alpha=32, lr 1e-4, 300 steps | 150 of 300 | 0.887 / 0.756 | **In use (2026-11-20).** In the owner's blind comparisons, Trained voice + reference sounded most like the owner, with Maximum resemblance a close second. It is now the studio default. |
 
 The same run's other checkpoints scored as follows. Lower is better. "Diff" tracks how the voice sounds; "total" also includes when to stop speaking.
 
