@@ -69,6 +69,17 @@ Call us at (555) 123-4567 or visit www.example.com. We've served customers since
 
 Next for the owner: restart the studio, try the Script preview, a per-paragraph style and the Guide, regenerate the Nuvexa and Pro plan sections, and report anything still confusing. Then continue with roadmap step 6 (dataset builder).
 
+### Rented-GPU training kit · 2026-11-20 (roadmap step 7, in progress)
+
+The owner recorded and exported 184 clips (19.6 minutes; 175 train, 9 validation, 2.3–15.3 seconds each) to `data/studio/dataset/exports/2026-11-20_154735`. The `training/` folder holds the kit:
+
+- `voxcpm2_lora.yaml`: keys from the VoxCPM fine-tuning guide (16 kHz, batch 16, max 8,192 batch tokens, learning rate 1e-4, LoRA r=32 and alpha=32 on the LM and DiT). It runs 300 steps with checkpoints every 50, because about 175 clips at batch 16 is roughly 11 steps per pass, and the guide suggests 1–3 passes for one speaker while small runs often need more. Checkpoints are compared by ear.
+- `train_on_pod.sh`: installs VoxCPM from GitHub (tag 2.0.3 when present), downloads VoxCPM2 revision `7936080b41163874f38610f46f438e2c0757f9fd`, trains, runs `make_samples.py`, and zips adapter weights and settings plus samples to `voice-lora-results.zip`.
+- `make_samples.py`: for each checkpoint, two test sentences with no reference and with the reference, plus a baseline without the adapter. It passes the checkpoint's own `lora_config.json`, because the library's default `LoRAConfig` uses r=8.
+- `make_kit.py`: zips the newest export, the kit and the active reference. The first kit is `2026-11-20_154735-voice-training-kit.zip` (28 MB).
+
+Per the guide, LoRA needs about 20 GB of VRAM; a 48 GB RTX A6000 is recommended, or a 4090 at batch 8. The owner added Runpod as a custom connector (`https://mcp.runpod.io/`) on 2026-11-20 and asked to be consulted before any charge: show the GPU, hourly price, disk and storage, and an estimated total, and wait for a yes before creating a pod; ask again before stopping or deleting it. The connector's tools did not load in the chat where it was added, so continue in a new chat. The scripts have not been run on a GPU yet; report errors from the pod. Still to do after training: load the chosen adapter in the studio (CPU via `lora_weights_path`; GPU via audio.cpp's `lora` session option) and compare it blind with zero-shot takes.
+
 ### Voice training dataset builder · 2026-11-20 (roadmap step 6, implemented, not yet used)
 
 - **Voice training** page: one prompt at a time, record and stop with a button or the space bar, playback, a check result, and **Use this take for training**. It also has progress toward 10, 30 and 60 minutes, microphone choice and tips, **Add your own scripts**, and **Export training set**.
