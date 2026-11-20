@@ -8,6 +8,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from studio.app import create_app
+from studio.store import PARAGRAPH_PAUSE_MS
 from test_takes import FakeEngine, wait_for, write_wav
 
 
@@ -20,6 +21,7 @@ class LongWorkflowTests(unittest.TestCase):
             "Last: thank you for spending the evening with us. We hope to see you again at the next event.",
         ]
         script = "\n\n".join(paragraphs)
+        pause = 24000 * PARAGRAPH_PAUSE_MS // 1000
         headers = {"X-Studio-Request": "1"}
         with TemporaryDirectory(dir=".tools") as temporary:
             root = Path(temporary)
@@ -36,10 +38,10 @@ class LongWorkflowTests(unittest.TestCase):
                 self.assertGreater(len(downloads["mp3"]), 1000)
                 with wave.open(io.BytesIO(downloads["wav"]), "rb") as audio:
                     self.assertEqual((audio.getnchannels(), audio.getsampwidth(), audio.getframerate()), (1, 2, 24000))
-                    self.assertEqual(audio.getnframes(), 4 * 24000 + 3 * 3840)
+                    self.assertEqual(audio.getnframes(), 4 * 24000 + 3 * pause)
                     # Each synthetic section has a different frequency; confirm the export keeps their order.
                     for index, frequency in enumerate((280, 340, 400, 460)):
-                        audio.setpos(index * (24000 + 3840))
+                        audio.setpos(index * (24000 + pause))
                         samples = audio.readframes(24000)
                         import struct
                         values = struct.unpack("<24000h", samples)

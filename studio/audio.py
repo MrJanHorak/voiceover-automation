@@ -328,15 +328,59 @@ def balanced_section(source):
     return destination
 
 
-def export_audio(chunks, wav_path, mp3_path):
+def trim_edge_silence(samples, rate=RATE, threshold_db=-45.0, window_ms=10,
+                      keep_lead_ms=30, keep_tail_ms=80, fade_in_ms=8, fade_out_ms=25):
+    """Remove leading and trailing silence from 16-bit PCM samples and fade the new edges.
+
+    Silence is judged per short window relative to the loudest window, so a single click
+    does not count as speech. A little silence is kept so breaths and decays are not cut.
+    """
+    import numpy as np
+
+    audio = np.asarray(samples, dtype=np.int16)
+    window = max(1, rate * window_ms // 1000)
+    count = audio.size // window
+    if count == 0:
+        return audio
+    blocks = audio[:count * window].astype(np.float64).reshape(count, window)
+    rms = np.sqrt(np.mean(blocks * blocks, axis=1))
+    loudest = float(rms.max())
+    if loudest <= 0:
+        return audio
+    loud = rms >= loudest * 10 ** (threshold_db / 20)
+    # Require three loud windows in a row (30 ms) so an isolated click is not taken for speech.
+    runs = np.convolve(loud.astype(np.int8), np.ones(3, dtype=np.int8), mode="valid") == 3
+    starts = np.flatnonzero(runs)
+    if starts.size == 0:
+        return audio
+    voiced = np.array([starts[0], starts[-1] + 2])
+    first = max(0, voiced[0] * window - rate * keep_lead_ms // 1000)
+    last = min(audio.size, (voiced[-1] + 1) * window + rate * keep_tail_ms // 1000)
+    trimmed = audio[first:last].astype(np.float64)
+    fade_in = min(trimmed.size, rate * fade_in_ms // 1000)
+    fade_out = min(trimmed.size, rate * fade_out_ms // 1000)
+    if fade_in:
+        trimmed[:fade_in] *= np.linspace(0.0, 1.0, fade_in, endpoint=False)
+    if fade_out:
+        trimmed[-fade_out:] *= np.linspace(1.0, 0.0, fade_out)
+    return np.round(trimmed).astype(np.int16)
+
+
+def export_audio(chunks, wav_path, mp3_path, trim=False):
+    """Join sections in order. With `trim`, each pause is the full gap between sections."""
+    import numpy as np
+
     with wave.open(str(wav_path), "wb") as master:
         master.setparams((1, 2, RATE, 0, "NONE", "not compressed"))
         for index, (path, pause_ms) in enumerate(chunks):
             with wave.open(str(balanced_section(path)), "rb") as chunk:
                 if (chunk.getnchannels(), chunk.getsampwidth(), chunk.getframerate()) != (1, 2, RATE):
                     raise AudioError("A section has an unexpected audio format. Regenerate that section.")
-                master.writeframesraw(chunk.readframes(chunk.getnframes()))
+                frames = chunk.readframes(chunk.getnframes())
+            if trim:
+                frames = trim_edge_silence(np.frombuffer(frames, dtype="<i2")).astype("<i2").tobytes()
+            master.writeframesraw(frames)
             if index + 1 < len(chunks):
                 master.writeframesraw(bytes(RATE * 2 * pause_ms // 1000))
 
-    ffmpeg("-n", "-i", str(wav_path), "-codec:a", "libmp3lame", "-b:a", "96k", str(mp3_path))
+    ffmpeg("-n", "-i", str(wav_path), "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3_path))

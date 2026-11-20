@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,7 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .settings import TurboSettings
-from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script, validate_directions
+from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,8 @@ class SectionInput(BaseModel):
     text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)]
     instructions: Directions | None = None
     turbo_settings: TurboSettings | None = None
+    # Used only when preparing a new recording; regeneration keeps the section's saved pause.
+    pause_ms: Annotated[int, Field(strict=True, ge=0, le=MAX_PAUSE_MS)] | None = None
 
 
 class JobInput(BaseModel):
@@ -64,11 +67,15 @@ class ReferenceMix(BaseModel):
 def install_voice(store, source, label):
     voice_id = new_id()
     destination = store.voices / f"{voice_id}.wav"
+    # Keep the untouched recording at its original quality for future fine-tuning datasets.
+    original = store.originals / f"{voice_id}.wav"
     try:
         duration = prepare_reference(source, destination)
+        shutil.copyfile(source, original)
         return store.add_voice(voice_id, label, duration)
     except Exception:
         destination.unlink(missing_ok=True)
+        original.unlink(missing_ok=True)
         raise
 
 
@@ -117,7 +124,7 @@ def render_job(store, engine, directed, stop, job_id):
     export = f"export-{new_id()}"
     wav, mp3 = folder / f"{export}.wav", folder / f"{export}.mp3"
     try:
-        export_audio(paths, wav, mp3)
+        export_audio(paths, wav, mp3, trim=bool(job.get("trim_edges")))
         store.finish_job(job_id, export)
     except Exception:
         wav.unlink(missing_ok=True)
@@ -301,7 +308,9 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     def create_job(data: JobInput):
         prepared = None
         if data.sections is not None:
-            prepared = [{"text": item.text, "instructions": item.instructions or ""} for item in data.sections]
+            prepared = [{"text": item.text, "instructions": item.instructions or "",
+                         "pause_ms": PARAGRAPH_PAUSE_MS if item.pause_ms is None else item.pause_ms}
+                        for item in data.sections]
             combined = "\n\n".join(item["text"] for item in prepared)
             if len(combined) > SCRIPT_LIMIT:
                 raise StudioError("The combined sections exceed the script length limit.")
@@ -316,7 +325,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
 
     @app.post("/api/sections/preview", dependencies=mutations)
     def preview_sections(data: PreviewInput):
-        return {"sections": split_script(data.script)}
+        sections = split_script_with_pauses(data.script)
+        return {"sections": [text for text, _ in sections], "pauses": [pause for _, pause in sections]}
 
     @app.get("/api/jobs/{job_id}")
     def job_details(job_id: UUID):

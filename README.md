@@ -64,7 +64,7 @@ For a fresh Windows setup, first complete the CUDA Python setup above. Download 
 
 The optional runtime and model are Apache-2.0 licensed. Linux users can supply compatible local runtime and model paths with `VOICEOVER_AUDIOCPP_PATH` and `VOICEOVER_VOXCPM2_GGUF`; the Windows CUDA build is the one tested here. Setup requires downloads, but generation runs locally without an API subscription.
 
-1. The studio imports `data\reference.wav` on the first run. Use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
+1. The studio imports `data\reference.wav` on the first run. Use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. The studio keeps an untouched copy of each new upload under `data\studio\voices\originals` for future fine-tuning. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
 2. Paste text or use **Import script** to load a UTF-8 `.txt`, `.docx`, or text-based `.pdf` file. Files can be up to 10 MB and extracted scripts can be up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Open a section to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
 
@@ -76,7 +76,7 @@ Open a completed section to see the voice reference, engine, and device used for
 
 Review imported text and reading order before generating. Word extraction includes body paragraphs and tables. Headers, footers, text boxes, and tracked changes may be omitted. Image-only or scanned PDFs need text recognition before import. PDFs with some textless pages show a notice so you can check for missing material.
 
-Use **Insert sound** in the script or a section to add a chuckle, laugh, or sigh. Listen to the result to check the effect. For a styled read, try a recording of your own voice in that delivery under **Saved references**. In a finished recording with multiple sections, use **Extra pause after section** to add 0–5,000 ms of silence between clips. For example, `500` adds half a second. **Update pause** rebuilds both export formats from the existing speech.
+Use **Insert sound** in the script or a section to add a chuckle, laugh, or sigh. Listen to the result to check the effect. For a styled read, try a recording of your own voice in that delivery under **Saved references**. In a finished recording with multiple sections, use **Extra pause after section** to set the gap between clips from 0 to 5,000 ms. New recordings trim the silence the model leaves at the start and end of each section, so the value is the whole gap: 350 ms after a sentence and 750 ms after a paragraph by default. For example, `500` gives half a second. Recordings created before this change keep their original joins, where the value is added to the model's own silence. **Update pause** rebuilds both export formats from the existing speech.
 
 The studio balances the loudness of each section for playback and exports. It keeps the original generated sections and adjusts their gain toward −20 LUFS with peak headroom. Peak limits and very short or quiet clips can affect the final level. For a recording created before this feature, open it in history and select **Balance volume** to rebuild its WAV and MP3 from its saved sections.
 

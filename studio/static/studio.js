@@ -703,7 +703,7 @@ byId("prepare-sections").addEventListener("click", async () => {
   errorAt("script-error");
   try {
     const result = await change("/api/sections/preview", { value: { script: script.value } });
-    setPrepared(result.sections.map((text) => ({ text, instructions: scriptDirections.field.value })));
+    setPrepared(result.sections.map((text, index) => ({ text, instructions: scriptDirections.field.value, pause_ms: result.pauses?.[index] })));
   } catch (error) {
     errorAt("script-error", error.message);
   }

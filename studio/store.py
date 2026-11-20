@@ -10,7 +10,10 @@ from uuid import uuid4
 
 SCRIPT_LIMIT = 12000
 CHUNK_LIMIT = 220
-DEFAULT_PAUSE_MS = 160
+DEFAULT_PAUSE_MS = 160  # Legacy column default for sections created before edge trimming.
+CLAUSE_PAUSE_MS = 150  # After a long sentence is wrapped mid-sentence.
+SENTENCE_PAUSE_MS = 350
+PARAGRAPH_PAUSE_MS = 750
 MAX_PAUSE_MS = 5000
 INSTRUCTIONS_LIMIT = 240
 ENGINE_VERSION = "Chatterbox Turbo 0.1.7 · 749d1c1"
@@ -44,25 +47,68 @@ def validate_directions(text, instructions, available):
         raise StudioError("Remove bracketed sound or delivery cues from the script when using Special instructions.")
 
 
-def split_script(script):
+# Abbreviations whose trailing period does not end a sentence.
+TITLES = {"mr", "mrs", "ms", "dr", "prof", "st", "rev", "gen", "capt", "lt", "sgt", "hon"}
+ALWAYS_CONTINUE = {"e.g", "i.e", "cf", "approx", "vs"}
+SOFT_ABBREVIATIONS = {
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+    "no", "nos", "vol", "fig", "dept", "est", "inc", "ltd", "co", "corp", "jr", "sr", "etc", "mt", "ave", "blvd",
+}
+INITIALISM = re.compile(r"^(?:[a-z]\.)+[a-z]$")
+
+
+def continues_sentence(previous, following):
+    """Whether a period after `previous` is an abbreviation rather than a sentence end."""
+    if not previous.endswith(".") or not following:
+        return False
+    word = previous.rstrip(".").lstrip("(\"'\u201c\u2018").lower()
+    if word in TITLES or word in ALWAYS_CONTINUE:
+        return True
+    if len(word) == 1 and word.isalpha() and previous[-2].isupper():
+        return True  # A middle initial, as in "John F. Kennedy".
+    if word in SOFT_ABBREVIATIONS or INITIALISM.match(word):
+        # "Jan. 5" and "the U.S. office" continue; "the U.S. Next year" starts a new sentence.
+        return not following[0].isupper()
+    return False
+
+
+def split_sentences(paragraph):
+    sentences = []
+    for piece in re.split(r"(?<=[.!?])\s+", paragraph):
+        if not piece:
+            continue
+        if sentences and continues_sentence(sentences[-1].split()[-1], piece):
+            sentences[-1] = f"{sentences[-1]} {piece}"
+        else:
+            sentences.append(piece)
+    return sentences
+
+
+def split_script_with_pauses(script):
+    """Split at paragraph and sentence ends, returning (text, pause after it in ms) pairs."""
     chunks = []
     for paragraph in re.split(r"\n\s*\n", script):
         current = ""
-        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split())):
-            if not sentence:
-                continue
+        start = len(chunks)
+        for sentence in split_sentences(" ".join(paragraph.split())):
             if len(current) + len(sentence) + 1 <= CHUNK_LIMIT:
                 current = f"{current} {sentence}".strip()
                 continue
             if current:
-                chunks.append(current)
+                chunks.append([current, SENTENCE_PAUSE_MS])
             *finished, current = textwrap.wrap(
                 sentence, width=CHUNK_LIMIT, break_on_hyphens=False,
             )
-            chunks.extend(finished)
+            chunks.extend([piece, CLAUSE_PAUSE_MS] for piece in finished)
         if current:
-            chunks.append(current)
-    return chunks
+            chunks.append([current, SENTENCE_PAUSE_MS])
+        if len(chunks) > start:
+            chunks[-1][1] = PARAGRAPH_PAUSE_MS
+    return [tuple(chunk) for chunk in chunks]
+
+
+def split_script(script):
+    return [text for text, _pause in split_script_with_pauses(script)]
 
 
 class Store:
@@ -70,6 +116,7 @@ class Store:
         self.root = root
         self.voices = root / "voices"
         self.recordings = root / "recordings"
+        self.originals = self.voices / "originals"
 
     @contextmanager
     def connect(self):
@@ -80,6 +127,7 @@ class Store:
 
     def initialize(self):
         self.voices.mkdir(parents=True, exist_ok=True)
+        self.originals.mkdir(exist_ok=True)
         self.recordings.mkdir(exist_ok=True)
         with self.connect() as db:
             db.execute("PRAGMA journal_mode = WAL")
@@ -147,8 +195,12 @@ class Store:
                                ("rendered_seed", "INTEGER"), ("rendered_at", "TEXT")):
                 if name not in section_columns:
                     db.execute(f"ALTER TABLE sections ADD COLUMN {name} {kind}")
-            if "instructions" not in {column["name"] for column in db.execute("PRAGMA table_info(jobs)")}:
+            job_columns = {column["name"] for column in db.execute("PRAGMA table_info(jobs)")}
+            if "instructions" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
+            # Existing recordings keep their original joins; new recordings trim section edge silence.
+            if "trim_edges" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN trim_edges INTEGER NOT NULL DEFAULT 0")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -210,7 +262,8 @@ class Store:
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None):
         sections = prepared_sections if prepared_sections is not None else [
-            {"text": text, "instructions": instructions} for text in split_script(script)
+            {"text": text, "instructions": instructions, "pause_ms": pause}
+            for text, pause in split_script_with_pauses(script)
         ]
         if not sections:
             raise StudioError("Enter a script with text to speak.")
@@ -221,8 +274,8 @@ class Store:
             if voice is None:
                 raise StudioError("Add a voice reference before generating a recording.", 409)
             db.execute("""
-                INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if any(section["instructions"] for section in sections) else ENGINE_VERSION,
                   now(), instructions))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
@@ -231,9 +284,12 @@ class Store:
                     return 35
                 selected = turbo_settings["seed"] if turbo_settings is not None else 35
                 return selected if selected else secrets.randbelow(2147483647) + 1
-            db.executemany("INSERT INTO sections (job_id, number, text, instructions, seed, turbo_settings) VALUES (?, ?, ?, ?, ?, ?)",
-                           [(job_id, index, section["text"], section["instructions"], selected_seed(section), settings_json)
-                            for index, section in enumerate(sections, 1)])
+            db.executemany("""
+                INSERT INTO sections (job_id, number, text, instructions, seed, turbo_settings, pause_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, [(job_id, index, section["text"], section["instructions"], selected_seed(section), settings_json,
+                   section.get("pause_ms", PARAGRAPH_PAUSE_MS))
+                  for index, section in enumerate(sections, 1)])
         return job_id
 
     def job(self, job_id):

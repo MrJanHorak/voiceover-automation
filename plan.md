@@ -4,7 +4,20 @@
 
 Turn customer scripts into voice-over audio using a clone of the owner's voice. Start with a private browser-based studio on the owner's Windows laptop. The owner reviews every recording and downloads the finished file for manual delivery. Self-host the studio once the local workflow is reliable. Add customer access, subscriptions, and automated fulfillment in Phase 2.
 
-## Current handoff · 2026-11-18
+## Current handoff · 2026-11-19
+
+The 2026-11-19 review found that the code is sound but that several details limit realism. The first fixes are implemented and not yet heard by the owner:
+
+- **Section joins.** New recordings trim each section's leading and trailing silence, keep 30 ms before and 80 ms after the speech, and fade the edges. Before this change, the measured gaps varied from about 0.36 to 0.85 seconds because each generated section has 12–199 ms of leading and 185–486 ms of trailing silence. The pause setting is now the full gap. Recordings created before this change keep their original joins; the `trim_edges` job column records which behavior applies.
+- **Pause defaults.** Sections now get 350 ms after a sentence, 750 ms after a paragraph and 150 ms where an overlong sentence is wrapped. Prepared sections created from blank lines use the paragraph pause.
+- **Sentence splitting.** Abbreviations such as Dr., Jan. 5, p.m., e.g. and the U.S. no longer end a section. An abbreviation followed by a capitalized word is still treated as a sentence end.
+- **Original references.** New uploads keep the untouched WAV under `data/studio/voices/originals/` for future fine-tuning. The eight references saved before this change exist only as 24 kHz mono copies; the original `data/reference.wav` is still on disk.
+- **MP3 export** now uses 192 kbps instead of 96 kbps.
+
+New model-free tests are in `tests/test_joins.py`; the long-workflow test now expects the paragraph pause. Run the full suite on Windows with the studio environment. The owner should listen to a new multi-paragraph recording and adjust the pause constants in `studio/store.py` if needed.
+
+### Earlier handoff · 2026-11-18
+
 
 The private local studio is implemented and the owner reports that it works, including Word document import. The latest changes add Chatterbox advanced controls with explanations and per-take settings, plus section take history and restoration. These changes were exercised with isolated browser tests and 12 automated tests; actual Chatterbox CPU inference with custom settings used a synthetic reference. The owner has not yet reported a listening comparison of the new GPU VoxCPM2 or advanced settings. Do not treat technical test success as confirmation that the generated voice is ready for customer delivery.
 
@@ -63,11 +76,39 @@ The local studio implements enrollment, pasted text, UTF-8 `.txt`, Word `.docx`,
 
 ### Delivery controls
 
-1. **Extra pause after section** adjusts the inserted silence from 0 to 5,000 ms and rebuilds the WAV and MP3 from the existing section recordings. The default remains 160 ms between sections.
+1. **Extra pause after section** adjusts the gap from 0 to 5,000 ms and rebuilds the WAV and MP3 from the existing section recordings. New recordings trim section edge silence, so the value is the full gap: 350 ms after a sentence and 750 ms after a paragraph by default. Older recordings keep the untrimmed joins and their 160 ms default.
 2. **Insert sound** offers `[chuckle]`, `[laugh]`, and `[sigh]` in the script or a section. Resemble documents these vocal sounds for Turbo. The owner found that whispering, dramatic, and narration tags gave weak or unclear results, and the installed Turbo engine ignores `exaggeration`. [Supported sounds](https://huggingface.co/ResembleAI/chatterbox-turbo/discussions/21), [Turbo implementation](https://github.com/resemble-ai/chatterbox/blob/master/src/chatterbox/tts_turbo.py)
 3. **Saved references** lets the owner name new samples and switch between previously saved ones. Compare conversational, warm, dramatic, and whispered recordings using the same script, then choose the references that carry over the intended delivery while retaining the owner's voice.
 4. **Special instructions** uses local VoxCPM2 for directed reads. Keep the reference and script fixed while comparing neutral, whispered, subtly dramatic, and strongly dramatic directions. Evaluate resemblance, style adherence, and turnaround before applying a style to customer work. Sections with blank instructions use Chatterbox Turbo. [VoxCPM2 controllable cloning](https://huggingface.co/openbmb/VoxCPM2#controllable-voice-cloning)
 5. **Advanced Chatterbox settings** controls seed, temperature, Top P, Top K, repetition penalty, and reference loudness normalization. Each control includes a plain-language explanation. The settings and resolved seed are stored with new takes, and section settings can be changed when regenerating. The installed Turbo implementation ignores Min P; do not expose it as an active control. Reference normalization is separate from the studio's output loudness balancing.
+
+## Roadmap · realism and automation
+
+Work in this order. Each step should be heard and compared with the previous best before the next one starts.
+
+1. **Done, pending listening:** section edge trimming, sentence and paragraph pauses, abbreviation-aware splitting, kept original references and 192 kbps MP3.
+2. **Maximum-resemblance mode.** Add VoxCPM2 "ultimate cloning", which passes the reference audio and its exact transcript (`prompt_wav_path`, `prompt_text`, plus the same file as `reference_wav_path`). Store a transcript with each reference, drafted by local speech recognition and corrected by the owner. Compare against Chatterbox and controllable cloning on the same scripts.
+3. **Text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
+4. **Delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
+5. **Automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
+6. **Fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
+7. **Fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.
+8. **Hands-off intake.** A watched folder or local API turns a script file into a checked WAV and MP3 for owner approval. Customer access and billing remain Phase 2.
+
+Avoid engines whose weights are licensed for noncommercial use only, such as XTTS-v2, F5-TTS and the Fish/OpenAudio releases, for paid work.
+
+## Hosting options for training and rendering (researched 2026-11-19, not deployed)
+
+The RTX 3050's 4 GB cannot train VoxCPM2 (about 8 GB of VRAM just for inference). Rent a GPU only for training and heavy batch rendering, and keep everyday studio rendering local until volume justifies more.
+
+| Use | Recommended | Indicative price | Notes |
+| --- | --- | --- | --- |
+| LoRA training runs (a few hours each) | RunPod Pod, RTX 4090 24 GB or A6000/L40S 48 GB | 4090 about $0.34/h Community, $0.89/h Secure after the October 2026 increase; A6000 about $0.59/h; L40S about $1.09/h | Per-second billing, no egress fees. Secure Cloud for voice data. Network volumes are about $0.07/GB/month and keep billing while stopped. |
+| Cheapest experiments | Vast.ai marketplace, RTX 4090 | Advertised from about $0.13/h; median about $0.36–0.47/h | Hosts are third parties with variable reliability. Use only verified datacenter hosts for private voice data, or use synthetic data for tests. |
+| On-demand rendering API later | Modal serverless, L4 24 GB or A10 | About $0.80/h (L4) or $1.10/h (A10) billed only while running; $30 free credit a month on Starter | Scales to zero; cold starts add delay. Fits occasional renders without a running server. |
+| Always-on private studio later | A machine the owner controls with a 24 GB GPU, or a reserved cloud GPU | A rented 4090 running 24/7 costs roughly $250–650 a month | Revisit after measuring real job volume. |
+
+A typical LoRA run on 1–3 hours of audio should take a few hours on a 24 GB GPU, so each training attempt costs a few dollars of GPU time; data preparation is the larger effort. Prices change often; check before renting. Encrypt or delete voice data and adapters on rented machines after each run.
 
 ### Self-host privately after local validation
 
