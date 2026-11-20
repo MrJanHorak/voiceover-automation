@@ -16,6 +16,16 @@ The 2026-11-19 review found that the code is sound but that several details limi
 
 New model-free tests are in `tests/test_joins.py`; the long-workflow test now expects the paragraph pause. Run the full suite on Windows with the studio environment. The owner should listen to a new multi-paragraph recording and adjust the pause constants in `studio/store.py` if needed.
 
+### Maximum resemblance · 2026-11-19 (roadmap step 2, implemented, not yet heard)
+
+- Each saved reference has an editable **transcript** (`voices.transcript`, up to 1,000 characters), entered by the owner under **Voice reference**. No local speech-recognition model is installed, so drafting the transcript automatically is deferred; `funasr` is present in the directed environment but has no downloaded model.
+- A **Voice engine** choice (`standard` or `maximum`) is stored per section and per take (`voice_match`). It applies to sections without special instructions: `standard` uses Chatterbox Turbo and `maximum` uses VoxCPM2 continuation cloning. Sections with instructions keep the directed mode. Restoring a take restores its engine choice.
+- CPU path: `VoxCPM.generate(text, prompt_wav_path=reference, prompt_text=transcript, reference_wav_path=reference)`, as recommended in the VoxCPM2 README. GPU path: audio.cpp `--reference-text <transcript> --request-option ultimate_clone=true`. The GPU option names come from audio.cpp v0.9.4's model spec and help text and have not yet been run on this computer.
+- New sections record their engine as "VoxCPM2 · maximum resemblance" (or "VoxCPM2 Q8 · maximum resemblance" on the GPU).
+- Tests: `tests/test_voice_match.py`. The store tests passed in a Linux check; the routing and GPU-command tests need the Windows studio environment. A copy of the live database migrated with all references, recordings, sections and takes intact.
+
+Next for the owner: enter the transcript for the preferred reference, then compare Chatterbox, maximum resemblance on the CPU and maximum resemblance on the GPU with the same script. Judge resemblance, vowels, pacing and artifacts, ideally with a familiar listener. Report any GPU error so the audio.cpp options can be adjusted.
+
 ### Earlier handoff · 2026-11-18
 
 
@@ -87,7 +97,7 @@ The local studio implements enrollment, pasted text, UTF-8 `.txt`, Word `.docx`,
 Work in this order. Each step should be heard and compared with the previous best before the next one starts.
 
 1. **Done, pending listening:** section edge trimming, sentence and paragraph pauses, abbreviation-aware splitting, kept original references and 192 kbps MP3.
-2. **Maximum-resemblance mode.** Add VoxCPM2 "ultimate cloning", which passes the reference audio and its exact transcript (`prompt_wav_path`, `prompt_text`, plus the same file as `reference_wav_path`). Store a transcript with each reference, drafted by local speech recognition and corrected by the owner. Compare against Chatterbox and controllable cloning on the same scripts.
+2. **Implemented, pending listening: maximum-resemblance mode.** Add VoxCPM2 "ultimate cloning", which passes the reference audio and its exact transcript (`prompt_wav_path`, `prompt_text`, plus the same file as `reference_wav_path`). Store a transcript with each reference, drafted by local speech recognition and corrected by the owner. Compare against Chatterbox and controllable cloning on the same scripts.
 3. **Text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
 4. **Delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
 5. **Automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.

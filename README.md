@@ -88,6 +88,15 @@ To plan different deliveries before generating, add blank lines where you want s
 
 Special instructions accept your own plain-language description of emotion, pace, tone, or emphasis. The examples are starting points. VoxCPM2 tries to follow the instructions, and the result can vary, so listen to each take.
 
+### Maximum resemblance
+
+Maximum resemblance uses VoxCPM2's continuation cloning: it receives the voice reference together with an exact transcript of what you say in it, and continues in your voice. It aims for closer timbre, rhythm and delivery than Chatterbox, but it is slower and needs the VoxCPM2 setup above.
+
+1. Open **Reference transcript** under **Voice reference** and type exactly what you say in the active reference, word for word. Select **Save transcript**. Each saved reference has its own transcript; a combined reference needs the words of its excerpts in order.
+2. Choose **Maximum resemblance** under **Voice engine** and generate. To try it on one section, open the section, change its engine and select **Regenerate section**.
+
+The engine choice applies to sections without special instructions. Sections with special instructions still use VoxCPM2's directed mode. Remove bracketed sound cues before using maximum resemblance, because VoxCPM2 would read them aloud. A wrong transcript can cause mispronunciations or artifacts, so check it against the recording. The first section starts with seed 35; regeneration picks a new seed. On the GPU, the studio passes the transcript to audio.cpp with its `ultimate_clone` option; the transcript appears in that process's arguments, but script text does not. Compare the result with Chatterbox on the same script before customer use.
+
 ### Advanced Chatterbox settings
 
 Open **Advanced Chatterbox settings** below the script to adjust seed, temperature, Top P, Top K, repetition penalty, and reference loudness normalization. Select the question mark beside a control for an explanation. These settings apply to Chatterbox sections; sections with special instructions use VoxCPM2 instead. Open a completed section to change its settings when regenerating; the settings and actual seed for new takes appear in **All takes**. The initial seed defaults to `35` to preserve the studio's previous behavior; `0` selects a new random seed, and regeneration starts with `0` for variety. Using a fixed seed can help repeat a take, but results can vary across devices or runtime versions.

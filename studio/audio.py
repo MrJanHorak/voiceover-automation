@@ -185,6 +185,15 @@ class DirectedEngine(ModelDetails):
         )
 
     def render(self, text, reference, seed, output, instructions):
+        # VoxCPM2 reads the leading parenthetical as control text. Keep its delimiters unambiguous.
+        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
+        self._generate(f"({direction}){text}", reference, seed, output)
+
+    def render_matched(self, text, reference, seed, output, transcript):
+        """Maximum resemblance: continue from the reference audio using its exact transcript."""
+        self._generate(text, reference, seed, output, transcript=" ".join(transcript.split()))
+
+    def _generate(self, text, reference, seed, output, transcript=None):
         if not self.available:
             raise AudioError("Start the studio with the VoxCPM2 setup described in the README.")
         os.environ["HF_HUB_OFFLINE"] = "1"
@@ -200,12 +209,10 @@ class DirectedEngine(ModelDetails):
             self.model = VoxCPM.from_pretrained(str(self.model_dir), device="cpu", optimize=False,
                                                 local_files_only=True, load_denoiser=False)
 
-        # VoxCPM2 reads the leading parenthetical as control text. Keep its delimiters unambiguous.
-        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
+        prompt = {"prompt_wav_path": str(reference), "prompt_text": transcript} if transcript else {}
         with torch.inference_mode():
             torch.manual_seed(seed)
-            audio = self.model.generate(text=f"({direction}){text}", reference_wav_path=str(reference),
-                                        denoise=False)
+            audio = self.model.generate(text=text, reference_wav_path=str(reference), denoise=False, **prompt)
             if not audio.size or not np.isfinite(audio).all() or not audio.any():
                 raise AudioError("The directed model returned unusable audio. Try a shorter section.")
             source_rate = self.model.tts_model.sample_rate
@@ -242,6 +249,14 @@ class CudaDirectedEngine(ModelDetails):
         return self.executable.is_file() and self.model.is_file() and find_spec("perth") is not None
 
     def render(self, text, reference, seed, output, instructions):
+        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
+        self._generate(f"({direction}){text}", reference, seed, output)
+
+    def render_matched(self, text, reference, seed, output, transcript):
+        """Maximum resemblance: audio.cpp's ultimate clone continues from the reference and its transcript."""
+        self._generate(text, reference, seed, output, transcript=" ".join(transcript.split()))
+
+    def _generate(self, text, reference, seed, output, transcript=None):
         if not self.available:
             raise AudioError("Set up the optional VoxCPM2 GPU files using the README, or restart with its CPU setting.")
         import numpy as np
@@ -249,14 +264,13 @@ class CudaDirectedEngine(ModelDetails):
         import soundfile as sf
         from scipy.signal import resample_poly
 
-        direction = " ".join(instructions.replace("(", " ").replace(")", " ").split())
         # Keep script and reference audio out of process arguments and temporary system directories.
         with TemporaryDirectory(prefix=".directed-", dir=output.parent) as temporary:
             folder = Path(temporary)
             inputs, outputs = folder / "input", folder / "output"
             inputs.mkdir()
             outputs.mkdir()
-            (inputs / "section.txt").write_text(f"({direction}){text}", encoding="utf-8")
+            (inputs / "section.txt").write_text(text, encoding="utf-8")
             converted = folder / "reference.wav"
             ffmpeg("-n", "-i", str(reference), "-vn", "-ac", "1", "-ar", "48000",
                    "-c:a", "pcm_s16le", str(converted))
@@ -271,6 +285,10 @@ class CudaDirectedEngine(ModelDetails):
                        "--request-option", f"seed={seed}",
                        "--batch-text-dir", str(inputs), "--voice-ref", str(converted),
                        "--out-dir", str(outputs)]
+            if transcript:
+                # The CLI accepts the reference transcript only as an argument. It describes the
+                # owner's reference recording, not customer script text.
+                command += ["--reference-text", transcript, "--request-option", "ultimate_clone=true"]
             try:
                 result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                         timeout=1800, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

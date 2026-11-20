@@ -37,6 +37,7 @@
           <div class="script-meta"><span id="script-cue"></span><span id="imported-file"></span><span id="script-count"></span></div>
           <p id="import-notice" class="muted instructions-hint" role="status" hidden></p>
           <p class="muted instructions-hint">Experimental delivery tags may have little audible effect. Vocal sounds are supported by Chatterbox.</p>
+          <div id="script-engine"></div>
           <div id="script-instructions"></div>
           <div id="script-advanced"></div>
           <div class="form-footer"><button class="button button-quiet" type="button" id="prepare-sections">Prepare sections</button></div>
@@ -72,6 +73,16 @@
           </div>
           <audio id="voice-audio" aria-label="Active voice reference" controls preload="none" hidden></audio>
           <p id="voice-error" class="error" role="alert" hidden></p>
+          <details id="reference-transcript" class="reference-enrollment" hidden>
+            <summary>Reference transcript <span class="muted" id="transcript-state"></span></summary>
+            <p class="muted instructions-hint">Type exactly what you say in this reference, word for word, including repeated words. Maximum resemblance continues from this recording, so a wrong word can cause mispronunciations or artifacts.</p>
+            <label for="voice-transcript">Words spoken in the reference</label>
+            <textarea id="voice-transcript" rows="4" maxlength="{{ transcript_limit }}" placeholder="e.g. Hi, I'm recording this sample in my normal speaking voice…"></textarea>
+            <div class="form-footer">
+              <button class="button button-quiet" id="save-transcript" type="button" disabled>Save transcript</button>
+              <span class="muted" id="transcript-status" role="status"></span>
+            </div>
+          </details>
           <details id="new-reference" class="reference-enrollment">
             <summary>Add reference WAV</summary>
             <label for="voice-label">Reference name <span class="muted">· Optional</span></label>
@@ -155,6 +166,19 @@
         <option value="[whispering]">Whispering</option>
       </optgroup>
     </select>
+  </template>
+  <template id="voice-engine">
+    <div class="instructions-control">
+      <label for="">Voice engine</label>
+      <select>
+        <option value="standard">Chatterbox Turbo · fast</option>
+        <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance · VoxCPM2 with reference transcript</option>
+      </select>
+      <p class="muted instructions-hint">
+        {% if directed_available %}Maximum resemblance is slower and needs the reference transcript. Sound cues are not available with it. Sections with special instructions always use VoxCPM2's directed mode.
+        {% else %}Set up local VoxCPM2 to use maximum resemblance. See the README.{% endif %}
+      </p>
+    </div>
   </template>
   <template id="delivery-instructions">
     <div class="instructions-control">

@@ -16,6 +16,8 @@ SENTENCE_PAUSE_MS = 350
 PARAGRAPH_PAUSE_MS = 750
 MAX_PAUSE_MS = 5000
 INSTRUCTIONS_LIMIT = 240
+TRANSCRIPT_LIMIT = 1000
+VOICE_MATCHES = ("standard", "maximum")
 ENGINE_VERSION = "Chatterbox Turbo 0.1.7 · 749d1c1"
 DIRECTED_VERSION = "VoxCPM2 2.0.3 · 7936080"
 TURBO_SOUND_CUE = re.compile(
@@ -82,6 +84,20 @@ def split_sentences(paragraph):
         else:
             sentences.append(piece)
     return sentences
+
+
+def validate_voice_match(text, instructions, voice_match, available, transcript):
+    """Check a section that uses VoxCPM2 maximum resemblance instead of Chatterbox."""
+    if voice_match not in VOICE_MATCHES:
+        raise StudioError("Choose a supported voice engine.")
+    if voice_match != "maximum" or instructions:
+        return  # Sections with special instructions use VoxCPM2's directed mode.
+    if not available:
+        raise StudioError("Maximum resemblance needs the local VoxCPM2 setup described in the README.", 409)
+    if not (transcript or "").strip():
+        raise StudioError("Add the exact words spoken in the voice reference before using maximum resemblance.", 409)
+    if TURBO_SOUND_CUE.search(text):
+        raise StudioError("Remove bracketed sound cues when using maximum resemblance; they are read aloud by VoxCPM2.")
 
 
 def split_script_with_pauses(script):
@@ -188,8 +204,15 @@ class Store:
                 db.execute("ALTER TABLE sections ADD COLUMN instructions TEXT NOT NULL DEFAULT ''")
             if "turbo_settings" not in section_columns:
                 db.execute("ALTER TABLE sections ADD COLUMN turbo_settings TEXT")
-            if "turbo_settings" not in {column["name"] for column in db.execute("PRAGMA table_info(section_takes)")}:
+            if "voice_match" not in section_columns:
+                db.execute("ALTER TABLE sections ADD COLUMN voice_match TEXT NOT NULL DEFAULT 'standard'")
+            take_columns = {column["name"] for column in db.execute("PRAGMA table_info(section_takes)")}
+            if "turbo_settings" not in take_columns:
                 db.execute("ALTER TABLE section_takes ADD COLUMN turbo_settings TEXT")
+            if "voice_match" not in take_columns:
+                db.execute("ALTER TABLE section_takes ADD COLUMN voice_match TEXT")
+            if "transcript" not in {column["name"] for column in db.execute("PRAGMA table_info(voices)")}:
+                db.execute("ALTER TABLE voices ADD COLUMN transcript TEXT NOT NULL DEFAULT ''")
             for name, kind in (("rendered_engine", "TEXT"), ("rendered_device", "TEXT"),
                                ("rendered_runtime", "TEXT"), ("rendered_model_sha256", "TEXT"),
                                ("rendered_seed", "INTEGER"), ("rendered_at", "TEXT")):
@@ -230,9 +253,16 @@ class Store:
 
     def add_voice(self, voice_id, label, duration):
         with self.connect() as db:
-            db.execute("INSERT INTO voices VALUES (?, ?, ?)", (voice_id, label, duration))
+            db.execute("INSERT INTO voices (id, label, duration) VALUES (?, ?, ?)", (voice_id, label, duration))
             self.select_voice(db, voice_id)
-        return {"id": voice_id, "label": label, "duration": duration}
+        return {"id": voice_id, "label": label, "duration": duration, "transcript": ""}
+
+    def set_transcript(self, voice_id, transcript):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("UPDATE voices SET transcript = ? WHERE id = ?", (transcript, voice_id)).rowcount == 0:
+                raise StudioError("Voice reference not found.", 404)
+            return dict(db.execute("SELECT * FROM voices WHERE id = ?", (voice_id,)).fetchone())
 
     @staticmethod
     def select_voice(db, voice_id):
@@ -260,7 +290,8 @@ class Store:
             return {"voice": self.active_voice(db), "voices": [dict(voice) for voice in voices],
                     "jobs": [dict(job) for job in jobs]}
 
-    def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None):
+    def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
+                   voice_match="standard", directed_available=False):
         sections = prepared_sections if prepared_sections is not None else [
             {"text": text, "instructions": instructions, "pause_ms": pause}
             for text, pause in split_script_with_pauses(script)
@@ -273,22 +304,27 @@ class Store:
             voice = self.active_voice(db)
             if voice is None:
                 raise StudioError("Add a voice reference before generating a recording.", 409)
+            for section in sections:
+                section.setdefault("voice_match", voice_match)
+                validate_voice_match(section["text"], section["instructions"], section["voice_match"],
+                                     directed_available, voice["transcript"])
+            uses_voxcpm = any(section["instructions"] or section["voice_match"] == "maximum" for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-            """, (job_id, title, script, voice["id"], DIRECTED_VERSION if any(section["instructions"] for section in sections) else ENGINE_VERSION,
+            """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
                   now(), instructions))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
-                if section["instructions"]:
+                if section["instructions"] or section["voice_match"] == "maximum":
                     return 35
                 selected = turbo_settings["seed"] if turbo_settings is not None else 35
                 return selected if selected else secrets.randbelow(2147483647) + 1
             db.executemany("""
-                INSERT INTO sections (job_id, number, text, instructions, seed, turbo_settings, pause_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO sections (job_id, number, text, instructions, seed, turbo_settings, pause_ms, voice_match)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, [(job_id, index, section["text"], section["instructions"], selected_seed(section), settings_json,
-                   section.get("pause_ms", PARAGRAPH_PAUSE_MS))
+                   section.get("pause_ms", PARAGRAPH_PAUSE_MS), section["voice_match"])
                   for index, section in enumerate(sections, 1)])
         return job_id
 
@@ -296,8 +332,9 @@ class Store:
         with self.connect() as db:
             db.execute("BEGIN")
             job = dict(self.get_job(db, job_id))
-            voice = db.execute("SELECT label FROM voices WHERE id = ?", (job["voice_id"],)).fetchone()
+            voice = db.execute("SELECT label, transcript FROM voices WHERE id = ?", (job["voice_id"],)).fetchone()
             job["voice_label"] = voice["label"] if voice else None
+            job["voice_transcript"] = voice["transcript"] if voice else ""
             job["sections"] = [dict(section) for section in db.execute(
                 "SELECT * FROM sections WHERE job_id = ? ORDER BY number", (job_id,),
             )]
@@ -329,18 +366,19 @@ class Store:
         details = details or {}
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            section = db.execute("SELECT text, instructions, turbo_settings FROM sections WHERE job_id = ? AND number = ?",
+            section = db.execute("SELECT text, instructions, turbo_settings, voice_match FROM sections WHERE job_id = ? AND number = ?",
                                  (job_id, number)).fetchone()
             if section is None:
                 raise StudioError("Section not found.", 404)
             rendered_at = now()
             db.execute("""
                 INSERT INTO section_takes
-                    (id, job_id, section_number, audio, text, instructions, seed, engine, device, runtime, model_sha256, created_at, turbo_settings)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, job_id, section_number, audio, text, instructions, seed, engine, device, runtime, model_sha256, created_at,
+                     turbo_settings, voice_match)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (new_id(), job_id, number, audio, section["text"], section["instructions"], seed,
                   details.get("engine"), details.get("device"), details.get("runtime"), details.get("model_sha256"), rendered_at,
-                  section["turbo_settings"]))
+                  section["turbo_settings"], section["voice_match"]))
             db.execute("""
                 UPDATE sections SET pending = 0, audio = ?, rendered_engine = ?, rendered_device = ?,
                     rendered_runtime = ?, rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?
@@ -372,11 +410,12 @@ class Store:
             db.execute("""
                 UPDATE sections SET text = ?, instructions = ?, seed = COALESCE(?, seed), pending = 0,
                     audio = ?, rendered_engine = ?, rendered_device = ?, rendered_runtime = ?,
-                    rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?, turbo_settings = ?
+                    rendered_model_sha256 = ?, rendered_seed = ?, rendered_at = ?, turbo_settings = ?,
+                    voice_match = COALESCE(?, 'standard')
                 WHERE job_id = ? AND number = ?
             """, (take["text"], take["instructions"], take["seed"], take["audio"], take["engine"],
                   take["device"], take["runtime"], take["model_sha256"], take["seed"], take["created_at"],
-                  take["turbo_settings"], job_id, number))
+                  take["turbo_settings"], take["voice_match"], job_id, number))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def finish_job(self, job_id, export):
@@ -402,26 +441,32 @@ class Store:
                 raise StudioError("Wait for the recording to finish before updating its volume.", 409)
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
-    def regenerate(self, job_id, number, text, instructions=None, directed_available=False, turbo_settings=None):
+    def regenerate(self, job_id, number, text, instructions=None, directed_available=False, turbo_settings=None,
+                   voice_match=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if self.get_job(db, job_id)["status"] != "ready":
+            job = self.get_job(db, job_id)
+            if job["status"] != "ready":
                 raise StudioError("Wait for the recording to finish before regenerating.", 409)
-            section = db.execute("SELECT instructions, turbo_settings FROM sections WHERE job_id = ? AND number = ?",
+            section = db.execute("SELECT instructions, turbo_settings, voice_match FROM sections WHERE job_id = ? AND number = ?",
                                  (job_id, number)).fetchone()
             if section is None:
                 raise StudioError("Section not found.", 404)
             instructions = section["instructions"] if instructions is None else instructions
+            voice_match = section["voice_match"] if voice_match is None else voice_match
             validate_directions(text, instructions, directed_available)
+            voice = db.execute("SELECT transcript FROM voices WHERE id = ?", (job["voice_id"],)).fetchone()
+            validate_voice_match(text, instructions, voice_match, directed_available, voice["transcript"] if voice else "")
             if turbo_settings is None and section["turbo_settings"]:
                 turbo_settings = json.loads(section["turbo_settings"])
                 turbo_settings["seed"] = 0
-            seed = turbo_settings["seed"] if turbo_settings and not instructions else 0
+            seed = turbo_settings["seed"] if turbo_settings and not instructions and voice_match != "maximum" else 0
             seed = seed if seed else secrets.randbelow(2147483647) + 1
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             db.execute("""
-                UPDATE sections SET text = ?, instructions = ?, seed = ?, turbo_settings = ?, pending = 1 WHERE job_id = ? AND number = ?
-            """, (text, instructions, seed, settings_json, job_id, number))
+                UPDATE sections SET text = ?, instructions = ?, seed = ?, turbo_settings = ?, voice_match = ?, pending = 1
+                WHERE job_id = ? AND number = ?
+            """, (text, instructions, seed, settings_json, voice_match, job_id, number))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def adjust_pause(self, job_id, number, pause_ms):

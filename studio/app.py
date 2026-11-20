@@ -20,13 +20,15 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .audio import MAX_REFERENCE_BYTES, AudioError, CudaDirectedEngine, DirectedEngine, TurboEngine, balanced_section, combine_reference_excerpts, export_audio, prepare_reference
 from .script_import import MAX_SCRIPT_FILE_BYTES, extract_script
 from .settings import TurboSettings
-from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
+from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 
 
 PROJECT = Path(__file__).resolve().parents[1]
 PACKAGE = Path(__file__).parent
 LOG = logging.getLogger(__name__)
 Directions = Annotated[str, StringConstraints(strip_whitespace=True, max_length=INSTRUCTIONS_LIMIT)]
+# Engine for sections without special instructions: Chatterbox, or VoxCPM2 maximum resemblance.
+VoiceMatch = Literal["standard", "maximum"]
 
 
 class SectionInput(BaseModel):
@@ -35,6 +37,11 @@ class SectionInput(BaseModel):
     turbo_settings: TurboSettings | None = None
     # Used only when preparing a new recording; regeneration keeps the section's saved pause.
     pause_ms: Annotated[int, Field(strict=True, ge=0, le=MAX_PAUSE_MS)] | None = None
+    voice_match: VoiceMatch | None = None
+
+
+class TranscriptInput(BaseModel):
+    transcript: Annotated[str, StringConstraints(strip_whitespace=True, max_length=TRANSCRIPT_LIMIT)]
 
 
 class JobInput(BaseModel):
@@ -43,6 +50,7 @@ class JobInput(BaseModel):
     instructions: Directions = ""
     sections: Annotated[list[SectionInput], Field(min_length=1, max_length=SCRIPT_LIMIT)] | None = None
     turbo_settings: TurboSettings | None = None
+    voice_match: VoiceMatch = "standard"
 
 
 class PreviewInput(BaseModel):
@@ -93,12 +101,16 @@ def render_job(store, engine, directed, stop, job_id):
             filename = f"section-{section['number']}-{new_id()}.wav"
             try:
                 arguments = (section["text"], reference, section["seed"], folder / filename)
-                if section["instructions"]:
+                matched = not section["instructions"] and section.get("voice_match") == "maximum"
+                if section["instructions"] or matched:
                     if getattr(directed, "needs_exclusive_gpu", False):
                         release = getattr(engine, "release", None)
                         if release:
                             release()
-                    directed.render(*arguments, section["instructions"])
+                    if matched:
+                        directed.render_matched(*arguments, job.get("voice_transcript") or "")
+                    else:
+                        directed.render(*arguments, section["instructions"])
                     rendered_by = directed
                 else:
                     settings = json.loads(section["turbo_settings"]) if section["turbo_settings"] else None
@@ -113,6 +125,8 @@ def render_job(store, engine, directed, stop, job_id):
                         details = rendered_by.details()
                     except Exception as error:
                         LOG.warning("Could not record model details (%s)", type(error).__name__)
+                if details and matched and details.get("engine"):
+                    details = {**details, "engine": f"{details['engine']} · maximum resemblance"}
                 store.finish_section(job_id, section["number"], filename, details, section["seed"])
             except Exception:
                 (folder / filename).unlink(missing_ok=True)
@@ -231,6 +245,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
             "device": device, "directed_device": directed_device,
             "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
+            "transcript_limit": TRANSCRIPT_LIMIT,
         })
 
     @app.get("/assets/{asset}")
@@ -300,6 +315,10 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     def saved_reference_audio(voice_id: UUID):
         return file_response(store.voices / f"{voice_id.hex}.wav", "audio/wav")
 
+    @app.put("/api/voice/{voice_id}/transcript", dependencies=mutations)
+    def save_transcript(voice_id: UUID, data: TranscriptInput):
+        return store.set_transcript(voice_id.hex, " ".join(data.transcript.split()))
+
     @app.put("/api/voice/{voice_id}/active", dependencies=mutations)
     def activate_voice(voice_id: UUID):
         return store.activate_voice(voice_id.hex)
@@ -309,7 +328,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         prepared = None
         if data.sections is not None:
             prepared = [{"text": item.text, "instructions": item.instructions or "",
-                         "pause_ms": PARAGRAPH_PAUSE_MS if item.pause_ms is None else item.pause_ms}
+                         "pause_ms": PARAGRAPH_PAUSE_MS if item.pause_ms is None else item.pause_ms,
+                         "voice_match": item.voice_match or data.voice_match}
                         for item in data.sections]
             combined = "\n\n".join(item["text"] for item in prepared)
             if len(combined) > SCRIPT_LIMIT:
@@ -321,7 +341,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
             validate_directions(data.script, data.instructions, directed.available)
             script = data.script
         settings = data.turbo_settings.model_dump() if data.turbo_settings else None
-        return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings)}
+        return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings,
+                                       data.voice_match, directed.available)}
 
     @app.post("/api/sections/preview", dependencies=mutations)
     def preview_sections(data: PreviewInput):
@@ -334,11 +355,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
         return {
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
             "voice_reference": job["voice_label"],
-            "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms")},
+            "voice_transcript_ready": bool(job["voice_transcript"]),
+            "sections": [{**{key: section[key] for key in ("number", "text", "instructions", "pending", "audio", "pause_ms", "voice_match")},
                           "generation": {key: section[f"rendered_{key}"] for key in
                                          ("engine", "device", "runtime", "model_sha256", "seed", "at")},
                           "turbo_settings": json.loads(section["turbo_settings"]) if section["turbo_settings"] else None,
-                          "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at")},
+                          "takes": [{**{key: take[key] for key in ("id", "text", "instructions", "engine", "device", "created_at", "voice_match")},
                                      "seed": take["seed"],
                                      "turbo_settings": json.loads(take["turbo_settings"]) if take["turbo_settings"] else None,
                                      "current": take["audio"] == section["audio"],
@@ -350,7 +372,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None):
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput):
         settings = data.turbo_settings.model_dump() if data.turbo_settings else None
-        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings)
+        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings, data.voice_match)
         return {"id": job_id.hex}
 
     @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)

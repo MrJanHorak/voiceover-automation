@@ -25,6 +25,9 @@ const sectionDrafts = new Map();
 const pauseDrafts = new Map();
 const instructionDrafts = new Map();
 const turboDrafts = new Map();
+const matchDrafts = new Map();
+let transcriptVoice = null;
+let transcriptDirty = false;
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
   repetition_penalty: 1.2, normalize_reference: true };
@@ -64,13 +67,32 @@ function change(url, { method = "POST", value } = {}) {
   return request(url, { method, headers, body });
 }
 
+function matchReady(instructions, match) {
+  // Maximum resemblance applies only to sections without special instructions.
+  return instructions.trim() || match !== "maximum" || (directedAvailable && Boolean(state.voice?.transcript));
+}
+
 function updateEditor() {
   byId("script-count").textContent = `${script.value.length.toLocaleString()} / ${scriptLimit.toLocaleString()}`;
   const directed = Boolean(scriptDirections.field.value.trim());
-  scriptSounds.disabled = directed;
-  const ready = prepared ? prepared.every((part) => part.text.trim() && (!part.instructions.trim() || directedAvailable))
-    : Boolean(script.value.trim()) && (!directed || directedAvailable);
+  const match = scriptEngine.field.value;
+  scriptSounds.disabled = directed || match === "maximum";
+  const ready = prepared
+    ? prepared.every((part) => part.text.trim() && (!part.instructions.trim() || directedAvailable) && matchReady(part.instructions, match))
+    : Boolean(script.value.trim()) && (!directed || directedAvailable) && matchReady(scriptDirections.field.value, match);
+  const needsTranscript = !directed && match === "maximum" && directedAvailable && state.voice && !state.voice.transcript;
+  errorAt("engine-note", needsTranscript ? "Add the reference transcript under Voice reference to use maximum resemblance." : "");
   byId("generate").disabled = submitting || referenceBusy || !state.voice || !ready || !scriptAdvanced.valid();
+}
+
+function voiceMatchEditor(id, value, readOnly = false) {
+  const box = byId("voice-engine").content.firstElementChild.cloneNode(true);
+  const field = box.querySelector("select");
+  field.id = id;
+  field.value = value || "standard";
+  field.disabled = readOnly;
+  box.querySelector("label").htmlFor = id;
+  return { box, field };
 }
 
 function advancedEditor(prefix, values, onChange, readOnly = false) {
@@ -185,7 +207,7 @@ function renderPrepared() {
     const sounds = cuePicker(field, "script-error");
     const directions = instructionsEditor(`prepared-instructions-${index}`, part.instructions);
     const refreshControls = () => {
-      sounds.disabled = Boolean(directions.field.value.trim());
+      sounds.disabled = Boolean(directions.field.value.trim()) || scriptEngine.field.value === "maximum";
       updateEditor();
     };
     field.addEventListener("input", () => { part.text = field.value; refreshControls(); });
@@ -238,8 +260,53 @@ function renderVoice() {
     audio.load();
   }
   errorAt("voice-error", state.reference_notice);
+  renderTranscript();
   byId("mix-add").disabled = !state.voices.length || byId("mix-excerpts").children.length >= 20;
 }
+
+function renderTranscript() {
+  const voice = state.voice;
+  const field = byId("voice-transcript");
+  byId("reference-transcript").hidden = !voice;
+  if (!voice) return;
+  if (transcriptVoice !== voice.id || !transcriptDirty) {
+    if (transcriptVoice !== voice.id) byId("transcript-status").textContent = "";
+    transcriptVoice = voice.id;
+    transcriptDirty = false;
+    field.value = voice.transcript || "";
+  }
+  byId("transcript-state").textContent = voice.transcript ? "· Saved" : "· Needed for maximum resemblance";
+  byId("save-transcript").disabled = !transcriptDirty;
+}
+
+byId("voice-transcript").addEventListener("input", () => {
+  transcriptDirty = true;
+  byId("transcript-status").textContent = "";
+  byId("save-transcript").disabled = false;
+});
+byId("save-transcript").addEventListener("click", async () => {
+  const button = byId("save-transcript");
+  const voiceId = transcriptVoice;
+  button.disabled = true;
+  errorAt("voice-error");
+  try {
+    const voice = await change(`/api/voice/${voiceId}/transcript`, { method: "PUT", value: { transcript: byId("voice-transcript").value } });
+    voiceRevision++;
+    state.voices = state.voices.map((item) => item.id === voice.id ? voice : item);
+    if (state.voice?.id === voice.id) state.voice = voice;
+    if (transcriptVoice === voice.id) {
+      transcriptDirty = false;
+      byId("transcript-status").textContent = "Transcript saved.";
+    }
+    voiceSignature = "";
+    renderVoice();
+    updateEditor();
+    if (job) renderSections(job);
+  } catch (error) {
+    errorAt("voice-error", error.message);
+    button.disabled = false;
+  }
+});
 
 function invalidateMix() {
   mixRevision++;
@@ -515,14 +582,23 @@ function renderSections(entry) {
     const sounds = cuePicker(field, "result-error");
     const directions = instructionsEditor(`section-instructions-${section.number}`,
       instructionDrafts.get(key) ?? section.instructions ?? "", field.readOnly);
+    const engine = voiceMatchEditor(`section-engine-${section.number}`,
+      matchDrafts.get(key) ?? section.voice_match, field.readOnly);
     const advanced = advancedEditor(`section-advanced-${section.number}`,
       turboDrafts.get(key) ?? { ...turboDefaults, ...(section.turbo_settings || {}), seed: 0 },
       () => { turboDrafts.set(key, advanced.value()); updateActions(); }, field.readOnly);
     const updateActions = () => {
       const directed = Boolean(directions.field.value.trim());
-      sounds.disabled = field.readOnly || directed;
-      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid();
+      const maximum = !directed && engine.field.value === "maximum";
+      sounds.disabled = field.readOnly || directed || maximum;
+      redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
+        || (maximum && (!directedAvailable || !entry.voice_transcript_ready));
+      redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
     };
+    engine.field.addEventListener("change", () => {
+      matchDrafts.set(key, engine.field.value);
+      updateActions();
+    });
     field.addEventListener("input", () => {
       sectionDrafts.set(key, field.value);
       updateActions();
@@ -536,11 +612,13 @@ function renderSections(entry) {
       errorAt("result-error");
       try {
         await change(`/api/jobs/${entry.id}/sections/${section.number}`, {
-          value: { text: field.value, instructions: directions.field.value, turbo_settings: advanced.value() },
+          value: { text: field.value, instructions: directions.field.value, turbo_settings: advanced.value(),
+            voice_match: engine.field.value },
         });
         sectionDrafts.delete(key);
         instructionDrafts.delete(key);
         turboDrafts.delete(key);
+        matchDrafts.delete(key);
         await refreshJob();
       } catch (error) {
         errorAt("result-error", error.message);
@@ -550,7 +628,7 @@ function renderSections(entry) {
     const actions = element("div", "section-actions");
     actions.append(sounds, redo);
     updateActions();
-    box.append(label, field, directions.box, advanced.box, actions);
+    box.append(label, field, engine.box, directions.box, advanced.box, actions);
     if ((section.takes?.length || 0) > 1 || (section.pending && section.takes?.length)) {
       const history = element("details", "take-history");
       history.append(element("summary", "", `All takes (${section.takes.length})`));
@@ -562,7 +640,7 @@ function renderSections(entry) {
         if (info) item.append(element("p", "muted", info));
         item.append(element("p", "take-text", take.text ?? "Words for this older take are unavailable."));
         if (take.instructions) item.append(element("p", "muted", `Instructions: ${take.instructions}`));
-        if (take.turbo_settings && !take.instructions) {
+        if (take.turbo_settings && !take.instructions && take.voice_match !== "maximum") {
           const setting = take.turbo_settings;
           item.append(element("p", "muted", `Seed ${take.seed} · Temperature ${setting.temperature} · Top P ${setting.top_p} · Top K ${setting.top_k} · Repetition ${setting.repetition_penalty} · Reference normalization ${setting.normalize_reference ? "on" : "off"}`));
         }
@@ -585,6 +663,7 @@ function renderSections(entry) {
               sectionDrafts.delete(key);
               instructionDrafts.delete(key);
               turboDrafts.delete(key);
+              matchDrafts.delete(key);
               await refreshJob();
             } catch (error) {
               errorAt("result-error", error.message);
@@ -692,13 +771,23 @@ async function refresh() {
 
 const scriptSounds = cuePicker(script, "script-error");
 const scriptDirections = instructionsEditor("recording-instructions", "");
+const scriptEngine = voiceMatchEditor("recording-engine", "standard");
 const scriptAdvanced = advancedEditor("script-advanced-setting", turboDefaults, updateEditor);
 byId("script-cue").append(scriptSounds);
+byId("script-engine").append(scriptEngine.box);
+const engineNote = element("p", "error");
+engineNote.id = "engine-note";
+engineNote.hidden = true;
+scriptEngine.box.append(engineNote);
 byId("script-instructions").append(scriptDirections.box);
 byId("script-advanced").append(scriptAdvanced.box);
 
 script.addEventListener("input", updateEditor);
 scriptDirections.field.addEventListener("input", updateEditor);
+scriptEngine.field.addEventListener("change", () => {
+  if (prepared) renderPrepared();
+  updateEditor();
+});
 byId("prepare-sections").addEventListener("click", async () => {
   errorAt("script-error");
   try {
@@ -728,8 +817,10 @@ byId("script-form").addEventListener("submit", async (event) => {
   try {
     const created = await change("/api/jobs", {
       value: prepared
-        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared, turbo_settings: scriptAdvanced.value() }
-        : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value, turbo_settings: scriptAdvanced.value() },
+        ? { title: byId("recording-title").value, script: prepared.map((part) => part.text).join("\n\n"), sections: prepared,
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value }
+        : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value,
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value },
     });
     await selectJob(created.id);
     await refresh();
