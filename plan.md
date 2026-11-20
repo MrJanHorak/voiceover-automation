@@ -4,19 +4,58 @@
 
 Turn customer scripts into voice-over audio using a clone of the owner's voice. Start with a private browser-based studio on the owner's Windows laptop. The owner reviews every recording and downloads the finished file for manual delivery. Self-host the studio once the local workflow is reliable. Add customer access, subscriptions, and automated fulfillment in Phase 2.
 
-## Current handoff · 2026-11-19
+## Current handoff · 2026-11-19 (end of day)
 
-The 2026-11-19 review found that the code is sound but that several details limit realism. The first fixes are implemented and not yet heard by the owner:
+### Resume here
 
-- **Section joins.** New recordings trim each section's leading and trailing silence, keep 30 ms before and 80 ms after the speech, and fade the edges. Before this change, the measured gaps varied from about 0.36 to 0.85 seconds because each generated section has 12–199 ms of leading and 185–486 ms of trailing silence. The pause setting is now the full gap. Recordings created before this change keep their original joins; the `trim_edges` job column records which behavior applies.
-- **Pause defaults.** Sections now get 350 ms after a sentence, 750 ms after a paragraph and 150 ms where an overlong sentence is wrapped. Prepared sections created from blank lines use the paragraph pause.
-- **Sentence splitting.** Abbreviations such as Dr., Jan. 5, p.m., e.g. and the U.S. no longer end a section. An abbreviation followed by a capitalized word is still treated as a sentence end.
-- **Original references.** New uploads keep the untouched WAV under `data/studio/voices/originals/` for future fine-tuning. The eight references saved before this change exist only as 24 kHz mono copies; the original `data/reference.wav` is still on disk.
-- **MP3 export** now uses 192 kbps instead of 96 kbps.
+All code from 2026-11-19 is committed (latest code commit "add auto checks of generated text…"). This end-of-day update to `plan.md`, `README.md` and `AGENTS.md` was the only uncommitted change at handoff; run `git status` to confirm it was committed. The Whisper model for automatic checks finished downloading to `models/whisper-small.en`: `model.safetensors` is 966,992,008 bytes, matching its header.
 
-New model-free tests are in `tests/test_joins.py`; the long-workflow test now expects the paragraph pause. Run the full suite on Windows with the studio environment. The owner should listen to a new multi-paragraph recording and adjust the pause constants in `studio/store.py` if needed.
+**Start of the next session, in PowerShell from the project folder:**
 
-### Automatic checks · 2026-11-19 (roadmap step 5, implemented, needs the Whisper download)
+1. Confirm the download: `dir models\whisper-small.en` should list `model.safetensors`, `config.json` and `preprocessor_config.json`. If files are missing, rerun the README download command; it resumes.
+2. Run the tests: `.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`. They have not yet been run on Windows since the 2026-11-19 changes; report any failure.
+3. Start the GPU studio:
+   ```powershell
+   $env:VOICEOVER_DEVICE = 'cuda'
+   $env:VOICEOVER_DIRECTED_DEVICE = 'cuda'
+   .\.tools\cuda-benchmark-env\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
+   ```
+4. Confirm that **If a section fails its automatic check** is selectable under the script (it is greyed out when the model is missing).
+5. Open the "number test" recording and select **Check recording**. Section 2 ("The Pro plan costs…", garbled at the start) should show **Needs review**. Whisper and the voice encoder have never run on this computer, so watch the terminal for errors on this first check.
+6. Regenerate that section with the instruction "energetic, upbeat TV commercial announcer, clear and confident", and once with the instruction cleared (maximum resemblance). Compare under **All takes**.
+7. Note the voice-match scores of takes that sound right and wrong, to calibrate the provisional 0.6 threshold (`MIN_SIMILARITY` in `studio/quality.py`).
+
+**Still to hear or confirm from 2026-11-19:**
+
+- The "Short and sweet. That's the goal." gap after the pause cap; the −16 LUFS export after the limiter fix (the Recording panel should show about −16.0 LUFS, mode linear); number handling with the test lines below.
+- Whether 350 ms after a sentence and 750 ms after a paragraph feel right (`SENTENCE_PAUSE_MS`, `PARAGRAPH_PAUSE_MS` in `studio/store.py`).
+- That the CPU and GPU maximum-resemblance paths both sound right; the GPU path works.
+
+Number test lines:
+
+```
+Our spring sale starts on Mar. 3, 2027 at 10:30 a.m. and runs through the 15th.
+
+The Pro plan costs $1,299.99, about 40% less than last year, and the Basic plan is just $19.
+
+Call us at (555) 123-4567 or visit www.example.com. We've served customers since 1998, from 2020-2026 alone over 12,000 of them.
+```
+
+**Next roadmap step:** step 6, the fine-tuning dataset builder (see the roadmap below). Then step 7: train a VoxCPM2 LoRA on a rented GPU (see the hosting table). audio.cpp v0.9.4 can load a LoRA adapter through its `lora` session option, so a trained adapter may run on the existing GPU path.
+
+**Working notes for a new chat:**
+
+- Read `AGENTS.md`, this section and `README.md`, then run `git status`. Preserve the owner's voice samples, recordings, database and exports; never use them as test fixtures. Look at them only read-only and only for diagnosis.
+- The cloud workspace cannot install packages or download models, and file deletion in the project folder needs the owner's permission. Run tests in a scratch folder outside the project when temporary-directory cleanup would need deletion.
+- Some tests import FastAPI, soundfile or torch and run only in the Windows environments. The model-free tests (`test_joins`, `test_spoken_text`, `test_quality`, `test_voice_match`, `test_delivery`) mostly run anywhere with numpy and FFmpeg.
+- Windows terminal noise to ignore: `ConnectionResetError [WinError 10054]`, the `pkg_resources` and `weight_norm` warnings, and VoxCPM2 progress bars stopping at 20–35%.
+- Do not upgrade huggingface_hub or other pinned packages without testing; the `hf download --include` form fetched nothing in 1.33, so the README uses `snapshot_download`.
+
+### Change log · 2026-11-19
+
+The sections below record what changed and why, newest first.
+
+### Automatic checks · 2026-11-19 (roadmap step 5, implemented, model downloaded, first run pending)
 
 - `studio/quality.py` transcribes each new take with Whisper through `transformers` (already in both studio environments), on the CPU and offline. It compares the transcript with the spoken text after normalizing both (so "$19" and "nineteen dollars" match), flags more than 15% word differences, flags two or more errors in the first six words (VoxCPM2's mumbled openings), scores resemblance with Chatterbox's voice encoder (`ve.safetensors`; flagged below a provisional 0.6) and flags a pace outside 1.0–4.5 words per second.
 - Results are stored per take (`section_takes.check_result`) and shown per section and take, with a count in the Recording panel.
@@ -72,6 +111,18 @@ Next for the owner: regenerate the test script, check the long-sentence join and
 - Tests: `tests/test_voice_match.py`. The store tests passed in a Linux check; the routing and GPU-command tests need the Windows studio environment. A copy of the live database migrated with all references, recordings, sections and takes intact.
 
 Next for the owner: enter the transcript for the preferred reference, then compare Chatterbox, maximum resemblance on the CPU and maximum resemblance on the GPU with the same script. Judge resemblance, vowels, pacing and artifacts, ideally with a familiar listener. Report any GPU error so the audio.cpp options can be adjusted.
+
+### Review fixes · 2026-11-19 (section joins, pauses, splitting, originals)
+
+The 2026-11-19 review found that the code is sound but that several details limit realism. First fixes:
+
+- **Section joins.** New recordings trim each section's leading and trailing silence, keep 30 ms before and 80 ms after the speech, and fade the edges. Before this change, the measured gaps varied from about 0.36 to 0.85 seconds because each generated section has 12–199 ms of leading and 185–486 ms of trailing silence. The pause setting is now the full gap. Recordings created before this change keep their original joins; the `trim_edges` job column records which behavior applies.
+- **Pause defaults.** Sections now get 350 ms after a sentence, 750 ms after a paragraph and 150 ms where an overlong sentence is wrapped. Prepared sections created from blank lines use the paragraph pause.
+- **Sentence splitting.** Abbreviations such as Dr., Jan. 5, p.m., e.g. and the U.S. no longer end a section. An abbreviation followed by a capitalized word is still treated as a sentence end.
+- **Original references.** New uploads keep the untouched WAV under `data/studio/voices/originals/` for future fine-tuning. The eight references saved before this change exist only as 24 kHz mono copies; the original `data/reference.wav` is still on disk.
+- **MP3 export** now uses 192 kbps instead of 96 kbps.
+
+New model-free tests are in `tests/test_joins.py`; the long-workflow test now expects the paragraph pause. Run the full suite on Windows with the studio environment. The owner should listen to a new multi-paragraph recording and adjust the pause constants in `studio/store.py` if needed.
 
 ### Earlier handoff · 2026-11-18
 
@@ -147,7 +198,7 @@ Work in this order. Each step should be heard and compared with the previous bes
 2. **Implemented, pending listening: maximum-resemblance mode.** Add VoxCPM2 "ultimate cloning", which passes the reference audio and its exact transcript (`prompt_wav_path`, `prompt_text`, plus the same file as `reference_wav_path`). Store a transcript with each reference, drafted by local speech recognition and corrected by the owner. Compare against Chatterbox and controllable cloning on the same scripts.
 3. **Implemented: text normalization and pronunciation list.** Expand numbers, currency, dates, phone numbers and units before synthesis, and keep an owner-edited list of word replacements that applies to every recording.
 4. **Implemented, pending listening: delivery quality.** Keep a 48 kHz master (VoxCPM2 outputs 48 kHz; it is currently resampled to 24 kHz), add a final loudness and true-peak pass with selectable targets such as −16 LUFS and −23 LUFS, add crossfades to combined references, and render Chatterbox sections before directed ones to avoid reloading models on the 4 GB GPU.
-5. **Implemented, needs the model download: automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
+5. **Implemented, first run pending: automatic checks.** Transcribe each new section locally and compare it with the script to catch skipped, repeated or invented words; score speaker similarity against the reference; flag clipping and unusual length. Then generate two or three seeds per section and keep the best-scoring take automatically, marking only failures for review.
 6. **Fine-tuning dataset builder.** Present sentences to read, record them in the browser at 48 kHz, trim and transcribe automatically, and export a training set (start with 30–60 minutes; 2–3 hours for the best result). Keep this owner-only and outside Git.
 7. **Fine-tune.** Train a VoxCPM2 LoRA first (officially supported from 5–10 minutes of audio), then evaluate a Chatterbox Turbo fine-tune with the community toolkit. Use the fine-tune together with a reference. Record the base revision, data size, training settings and license with each adapter, and compare blind against zero-shot results.
 8. **Hands-off intake.** A watched folder or local API turns a script file into a checked WAV and MP3 for owner approval. Customer access and billing remain Phase 2.

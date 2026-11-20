@@ -16,4 +16,5 @@
 ## Verification
 
 - For changes to the trial, check `python scripts/voice_trial.py --help`, input validation, and WAV output with the real engine when local weights are available. Inspect output format with FFprobe and disclose which device and fixtures were used.
+- Run the tests with `.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests` on Windows. Tests that supply a fake engine must not depend on local model files; pass a fake quality checker when a test needs checks.
 - For changes to the studio, verify the affected browser workflow and run model-free tests for job and file handling. Test inference separately with local weights. Keep prior valid exports intact on retry or failed regeneration.

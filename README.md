@@ -2,7 +2,7 @@
 
 This project runs a private browser studio for turning scripts into recordings in your voice. The command-line voice trial is also available for short model comparisons. See [plan.md](plan.md) for the project milestones and [AGENTS.md](AGENTS.md) for development instructions.
 
-For the latest project status and how to resume in a new chat, see [Current handoff](plan.md#current-handoff--2026-11-18). The studio is local-only at present; the owner has verified Word import, while listening comparisons of the newest GPU and advanced settings are still outstanding.
+For the latest project status and the steps to resume, see [Resume here](plan.md#resume-here) in the plan. The studio is local-only. As of 2026-11-19 it supports maximum-resemblance cloning, written-out numbers and a pronunciation list, a 48 kHz master with a final loudness pass, and automatic transcription checks with retries. Some of these still need a listening check.
 
 ## Start the browser studio
 
