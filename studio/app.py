@@ -28,6 +28,7 @@ from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRAINED_MATCHES, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 from .accounts import DUMMY_HASH, SESSION_COOKIE, SESSION_DAYS, RateLimiter, check_password, hash_password, new_token, normalize_email, token_hash, verify_password
 from .inbox import SCAN_SECONDS, Inbox, unique
+from .remote import DisabledEngine, RemoteDirectedEngine
 from .catalog import CONSENT_MEDIA, SAMPLE_TEXT, consent_extension, install_trained
 from .trained import find_trained, list_trained
 
@@ -372,11 +373,16 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     limiter = RateLimiter()
     device = os.environ.get("VOICEOVER_DEVICE", "cpu")
     directed_device = os.environ.get("VOICEOVER_DIRECTED_DEVICE", "cpu").lower()
-    if directed_device not in {"cpu", "cuda"}:
-        raise ValueError("VOICEOVER_DIRECTED_DEVICE must be cpu or cuda")
+    if directed_device not in {"cpu", "cuda", "remote"}:
+        raise ValueError("VOICEOVER_DIRECTED_DEVICE must be cpu, cuda or remote")
+    if device not in {"cpu", "cuda", "off"}:
+        raise ValueError("VOICEOVER_DEVICE must be cpu, cuda or off")
     templates = Jinja2Templates(directory=PACKAGE / "templates")
     if directed_engine is not None:
         directed = directed_engine
+    elif directed_device == "remote":
+        # Split hosting: VoxCPM2 runs on a Runpod Serverless GPU endpoint (worker/).
+        directed = RemoteDirectedEngine(os.environ.get("VOICEOVER_RUNPOD_ENDPOINT"), os.environ.get("VOICEOVER_RUNPOD_API_KEY"))
     elif directed_device == "cuda":
         executable = "audiocpp_cli.exe" if os.name == "nt" else "audiocpp_cli"
         runtime = Path(os.environ.get("VOICEOVER_AUDIOCPP_PATH", PROJECT / ".tools" / "audio-cpp" / executable))
@@ -475,7 +481,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                 LOG.warning("No admin account yet. Open /login and use setup code %s", app.state.setup_code)
                 print(f"\n  Voice studio setup code: {app.state.setup_code}  (open /login to create the admin account)\n", flush=True)
             stop = Event()
-            model = engine if engine is not None else TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
+            if engine is not None:
+                model = engine
+            elif device == "off":
+                model = DisabledEngine()
+            else:
+                model = TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
             thread = Thread(target=worker, args=(store, model, directed, stop, checker), name="voiceover-worker", daemon=True)
             thread.start()
             intake = None
@@ -780,6 +791,18 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         return {"name": target.name, "trained": [{"name": item["name"], "step": item["step"]}
                                                  for item in list_trained(store.root / "trained")]}
 
+    @app.get("/api/worker/adapters/{name}/{filename}", include_in_schema=False)
+    def worker_adapter(name: str, filename: Literal["lora_config.json", "lora_weights.safetensors"], request: Request):
+        """Trained voice files for the GPU worker, which caches them. Needs VOICEOVER_WORKER_TOKEN."""
+        expected = os.environ.get("VOICEOVER_WORKER_TOKEN", "")
+        supplied = request.headers.get("x-worker-token", "")
+        if len(expected) < 32 or not secrets.compare_digest(supplied, expected):
+            raise StudioError("Not found.", 404)
+        voice = find_trained(store.root / "trained", name)
+        if voice is None:
+            raise StudioError("Not found.", 404)
+        return FileResponse(voice["path"] / filename, media_type="application/octet-stream")
+
     @app.get("/", include_in_schema=False)
     def home(request: Request):
         user = current_user(request)
@@ -788,6 +811,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         admin = user["role"] == "admin"
         return templates.TemplateResponse(request=request, name="index.html", context={
             "admin": admin, "account": account_view(user), "auth_enabled": auth_enabled,
+            "chatterbox_available": device != "off",
             "house_match": house_match(),
             "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
             "device": device, "directed_device": directed_device,

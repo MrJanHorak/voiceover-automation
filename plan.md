@@ -8,6 +8,19 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 
 ### Resume here
 
+**Status on 2026-11-22:** the voice catalog works; the owner published a second voice and a customer recorded with it. Split hosting (Phase 2 step 3) is built but not deployed:
+- `studio/remote.py`: the studio side, `VOICEOVER_DIRECTED_DEVICE=remote`.
+- `worker/`: the Runpod Serverless handler and Dockerfile, built from GitHub.
+- `deploy/`: the VPS setup script, Caddy, systemd, environment template, and backup and restore, with a round trip tested with a stand-in sqlite3.
+
+**Owner decision (2026-11-22):** no domain yet, so no email service or Stripe yet. First, a free proof of concept for the brother-in-law: run the GPU studio on the owner's PC and share it with `scripts/share-studio.ps1` (Cloudflare Quick Tunnel, random `*.trycloudflare.com` address, testing only). Vercel was considered and ruled out: the studio is one Python app with a background render worker, SQLite and audio files on disk. For email later, the free tiers are Resend (3,000 a month, 100 a day) and Brevo (300 a day); both need the studio's own domain for sending to customers.
+
+Next session:
+1. Run the tests (new: `tests/test_remote.py`).
+2. Decide the domain, and create the Hetzner VPS and the Runpod endpoint. Each costs money, so the owner creates them, or Claude does only after explicit approval of the price.
+3. Follow `deploy/README.md`, then test with a voice sample on the server.
+4. Build email verification and password reset (pick Postmark, Resend or SES), plus fair queueing and per-customer daily limits.
+
 **Status on 2026-11-21, evening:** the owner created the admin account with the setup code, signed up a customer and made a recording on the GPU studio. Phase 2 step 1 works end to end, including the Customers page and Disable/Enable. Follow-up from the owner's feedback: admins now see a **My recordings / Customers** switch in the Recordings list, with the customer's email on each entry. An opened customer recording shows a **Customer recording · name · email** banner with **View account**. Customer recordings are read-only for admins: the server allows only GET and DELETE, and also refuses to send them to the outbox. Earlier: Phase 2 step 1 (accounts and roles) was implemented; the inbox and approval workflow from 2026-11-20 worked for the owner. Next session:
 
 1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`). The new `tests/test_accounts.py` includes an end-to-end test covering setup, sign-up, isolation, review and disabling; report failures.
@@ -366,7 +379,12 @@ Customers never see engine names, seeds or other technical settings, and never s
    - *Trained-voice upload checks `lora_config.json` with `read_config` and the safetensors header for LoRA keys, then stages and renames into `data/studio/trained/`.*
    - *On upgrade, the active voice became a published "Studio voice" with own-voice consent, once, marked in the `meta` table.*
    - *Cosmetic: the top bar stays on one row, with shorter admin labels (Voices, References, Training), the engine status moved to the Voices page, and the duplicate "Delivery style" label removed. Fixed a duplicate `review-filter` id between the Customers page and the Recordings section filter.)*
-3. Internet readiness: hosting choice, HTTPS, email (verification and reset), rate limits and per-account quotas, fair queueing, backups and a tested restore, retention policy. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy>`, so sign-in rate limits see real client addresses instead of the proxy's. Also set `VOICEOVER_ALLOWED_HOSTS` and `VOICEOVER_SECURE_COOKIES=1`, and add a Content-Security-Policy.
+3. Internet readiness. **Hosting decision (2026-11-22): the split setup.** Neither owner has a spare GPU PC, and volume will be small, so:
+   - **Website and database:** a small Linux VPS (Hetzner cost-optimized, about €6–8 a month, 2 vCPU / 4 GB) running the existing FastAPI app, SQLite, FFmpeg and the automatic checks on CPU (Whisper small plus the voice encoder). Caddy terminates HTTPS. uvicorn runs under systemd with `--proxy-headers`.
+   - **Rendering:** a Runpod Serverless endpoint with flex workers (scale to zero, billed per second), running VoxCPM2 with trained voices on a 24 GB GPU. The VPS sends each section as a job (text, seed, mode, reference audio as base64, the adapter's name and hash). The worker fetches adapters it has not cached from the VPS over HTTPS with a shared worker token, applies the Perth watermark, and returns 48 kHz WAV. In the studio this is `VOICEOVER_DIRECTED_DEVICE=remote` (`studio/remote.py`); the worker lives in `worker/`.
+   - **Chatterbox is off on the VPS** (`VOICEOVER_DEVICE=off`). Catalog voices use the trained voice + reference, or maximum resemblance.
+   - **Expected cost:** the VPS plus a domain is fixed. GPU is billed only while rendering, roughly a few cents per minute of finished audio plus a cold start of a minute or two for the first job after the endpoint has idled. Set the idle timeout to about 60 seconds, so all sections of one recording share one warm worker.
+   - **Remaining in this step:** hosting choice is done; still to do are HTTPS, email (verification and reset), rate limits and per-account quotas, fair queueing, backups and a tested restore, retention policy. HTTPS, email (verification and reset), rate limits and per-account quotas, fair queueing, backups and a tested restore, retention policy. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy>`, so sign-in rate limits see real client addresses instead of the proxy's. Also set `VOICEOVER_ALLOWED_HOSTS` and `VOICEOVER_SECURE_COOKIES=1`, and add a Content-Security-Policy.
 4. Billing: Stripe, credits and usage metering by audio length, plus receipts.
 
 ### Earlier notes

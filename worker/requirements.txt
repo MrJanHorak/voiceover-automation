@@ -1,0 +1,8 @@
+# GPU worker for Runpod Serverless. Torch comes from the base image and is pinned by constraints.
+runpod>=1.10,<2
+voxcpm==2.0.3
+resemble-perth==1.0.1
+# resemble-perth imports pkg_resources.
+setuptools<81
+soundfile>=0.12,<1
+scipy>=1.11

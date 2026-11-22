@@ -148,6 +148,8 @@ function voiceMatchEditor(id, value, readOnly = false) {
   const field = box.querySelector("select");
   field.id = id;
   field.value = value || (isAdmin ? "standard" : houseMatch);
+  // An engine this server cannot run (for example Chatterbox without a GPU) falls back to the first one it can.
+  if (field.selectedOptions[0]?.disabled) field.value = [...field.options].find((option) => !option.disabled)?.value ?? field.value;
   field.disabled = readOnly;
   if (!isAdmin) {
     field.value = houseMatch;

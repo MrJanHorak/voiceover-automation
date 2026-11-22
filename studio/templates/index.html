@@ -627,7 +627,7 @@
         {{ tip("Chatterbox Turbo is fast and supports sound cues such as [laugh]. Maximum resemblance uses VoxCPM2 with your reference and its transcript: it sounds most like you but is slower. Trained voice uses VoxCPM2 with the voice you trained on a rented GPU, without a reference clip; Trained voice + reference adds your reference clip as well. Sound cues work only with Chatterbox. A delivery style uses VoxCPM2's directed mode, with the trained voice when one is chosen.") }}
       </div>
       <select>
-        <option value="standard">Chatterbox Turbo · fast</option>
+        <option value="standard"{% if not chatterbox_available %} disabled{% endif %}>Chatterbox Turbo · fast{% if not chatterbox_available %} (not on this server){% endif %}</option>
         <option value="maximum"{% if not directed_available %} disabled{% endif %}>Maximum resemblance · sounds most like you</option>
         {% if trained_voice and directed_available %}
         <option value="trained">Trained voice · {{ trained_voice.name }} · no reference</option>

@@ -1,0 +1,29 @@
+# /etc/systemd/system/voiceover.service
+[Unit]
+Description=Voice-over studio (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=voiceover
+Group=voiceover
+WorkingDirectory=/opt/voiceover
+EnvironmentFile=/etc/voiceover.env
+# Library caches must be writable under ProtectSystem=strict.
+Environment=HF_HOME=/var/lib/voiceover/cache/huggingface XDG_CACHE_HOME=/var/lib/voiceover/cache NUMBA_CACHE_DIR=/var/lib/voiceover/cache/numba
+# Caddy on the same machine forwards requests; trust its X-Forwarded-For so sign-in limits see real addresses.
+ExecStart=/opt/voiceover/.venv/bin/python -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-access-log
+Restart=on-failure
+RestartSec=5
+# Hardening: the studio only writes to its data directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/voiceover
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

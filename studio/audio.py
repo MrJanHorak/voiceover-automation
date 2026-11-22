@@ -193,15 +193,16 @@ class TurboEngine(ModelDetails):
 
 
 class DirectedEngine(ModelDetails):
-    def __init__(self, model_dir: Path):
+    def __init__(self, model_dir: Path, device: str = "cpu"):
         self.model_dir = model_dir
+        self.device = device  # The GPU worker (worker/handler.py) runs this engine on cuda.
         self.model = None
         self.watermarker = None
         self.lora_config = None  # Settings of the LoRA layers built into the loaded model, if any.
         self.adapter = None  # Folder of the trained voice whose weights are loaded.
 
     def details(self):
-        return {"engine": "VoxCPM2", "device": "cpu", "runtime": package_version("voxcpm"),
+        return {"engine": "VoxCPM2", "device": self.device, "runtime": package_version("voxcpm"),
                 "model_sha256": self.model_hash(self.model_dir / "model.safetensors")}
 
     @property
@@ -225,6 +226,10 @@ class DirectedEngine(ModelDetails):
         """Trained voice: the LoRA adapter alone (reference None) or together with the reference clip."""
         self._generate(text, reference, seed, output, adapter=adapter)
 
+    def generate(self, text, reference, seed, output, transcript=None, adapter=None):
+        """The GPU worker's entry point: text already carries any delivery direction."""
+        self._generate(text, reference, seed, output, transcript=transcript, adapter=adapter)
+
     def _load(self, adapter):
         """Load VoxCPM2 once; build LoRA layers when a trained voice is first used, then switch them per take."""
         from voxcpm import VoxCPM
@@ -239,7 +244,7 @@ class DirectedEngine(ModelDetails):
 
                 options = {"lora_config": LoRAConfig(**config), "lora_weights_path": str(adapter)}
             self.model = None
-            self.model = VoxCPM.from_pretrained(str(self.model_dir), device="cpu", optimize=False,
+            self.model = VoxCPM.from_pretrained(str(self.model_dir), device=self.device, optimize=False,
                                                 local_files_only=True, load_denoiser=False, **options)
             self.lora_config, self.adapter = config, adapter if config is not None else None
         elif config is not None and adapter != self.adapter:

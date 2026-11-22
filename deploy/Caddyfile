@@ -1,0 +1,15 @@
+# /etc/caddy/Caddyfile — Caddy gets and renews the HTTPS certificate automatically.
+{$VOICEOVER_DOMAIN} {
+	encode zstd gzip
+	# Trained-voice uploads are about 70 MB; allow up to 1 GB.
+	request_body {
+		max_size 1GB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		Referrer-Policy "same-origin"
+		Permissions-Policy "camera=(), geolocation=(), microphone=(self)"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8000
+}

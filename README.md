@@ -58,8 +58,12 @@ Settings:
 | `VOICEOVER_AUTH` | `on` | `off` restores single-owner mode with no sign-in. Use it only when the studio is bound to `127.0.0.1`. |
 | `VOICEOVER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names the studio answers to; add the public domain when hosting. |
 | `VOICEOVER_SECURE_COOKIES` | off | Set to `1` behind HTTPS, so session cookies are sent only over HTTPS. |
+| `VOICEOVER_DIRECTED_DEVICE` | `cpu` | `cuda` uses audio.cpp on a local GPU; `remote` renders on the Runpod Serverless GPU endpoint (needs `VOICEOVER_RUNPOD_ENDPOINT`, `VOICEOVER_RUNPOD_API_KEY` and `VOICEOVER_WORKER_TOKEN`). |
+| `VOICEOVER_DEVICE` | `cpu` | Chatterbox device: `cpu`, `cuda`, or `off` on servers without a GPU. |
 
-The studio is not yet ready for the internet. Email verification, password reset, HTTPS and hosting are step 3 of Phase 2 in `plan.md`.
+**Free test sharing.** To let someone test the studio before paying for hosting, run `scripts\share-studio.ps1` (one-time: `winget install --id Cloudflare.cloudflared`). It starts the GPU studio and a Cloudflare Quick Tunnel, which prints a random `https://….trycloudflare.com` address to share. It needs no account or domain and costs nothing, but the address changes on each start and works only while your PC runs the script. Use it for testing only.
+
+**Online hosting.** The chosen setup is a small VPS for the website plus a Runpod Serverless GPU for rendering. See `deploy/README.md` for the server (setup script, HTTPS with Caddy, systemd, nightly backups and restore) and `worker/README.md` for the GPU endpoint. Email verification and password reset are still to come before inviting customers.
 
 ### Use the NVIDIA GPU for Chatterbox Turbo
 
