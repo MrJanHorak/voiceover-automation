@@ -28,7 +28,7 @@ class LongWorkflowTests(unittest.TestCase):
             root = Path(temporary)
             write_wav(root / "reference.wav", seconds=7)
             engine = FakeEngine()
-            with TestClient(create_app(root, engine), base_url="http://localhost") as client:
+            with TestClient(create_app(root, engine, auth=False), base_url="http://localhost") as client:
                 response = client.post("/api/jobs", json={"script": script}, headers=headers)
                 self.assertEqual(response.status_code, 202, response.text)
                 route = "/api/jobs/" + response.json()["id"]

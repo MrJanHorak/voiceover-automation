@@ -136,7 +136,7 @@ class IntakeApiTests(unittest.TestCase):
             write_wav(root / "reference.wav", seconds=7)
             headers = {"X-Studio-Request": "1"}
             with patch.dict(os.environ, {"VOICEOVER_INBOX": "off"}), \
-                 TestClient(create_app(root, FakeEngine()), base_url="http://localhost") as client:
+                 TestClient(create_app(root, FakeEngine(), auth=False), base_url="http://localhost") as client:
                 response = client.post("/api/intake", headers=headers,
                                        files={"file": ("Spring promo.txt", b"Hello from another app.", "text/plain")})
                 self.assertEqual(response.status_code, 202)

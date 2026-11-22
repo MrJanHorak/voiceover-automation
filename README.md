@@ -22,6 +22,25 @@ For the Chatterbox-only installation, use the original environment.
 
 Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python and model setup from step 1 below, `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
 
+### Accounts: admin and customers
+
+The studio has sign-in. On the first start with accounts, the terminal prints a **setup code**. Open the studio, which goes to the sign-in page, and create the admin account with that code. Existing recordings, voices and training data remain visible to the admin.
+
+- **Admin:** everything, including **Voice and words**, **Voice training**, trained voices, the inbox and outbox, and **Customers**. On the Customers page, the admin can review every script customers have submitted (also after a customer deletes the recording), open and listen to their recordings, disable an account (it is signed out, its queued recordings stop, and it cannot sign in), and make another account an admin. The studio always keeps at least one active admin.
+- **Customers:** create an account at `/signup` by accepting the terms of use. They get **New recording**, their own **Recordings** and the **Guide**. Their recordings use the studio voice with the admin's settings (currently Trained voice + reference); engine choices, seeds and model details are hidden. They can keep their own pronunciation list on top of the admin's global list. Each customer can have at most 3 recordings in progress, and downloads are available as soon as a recording is ready.
+
+Passwords are stored as scrypt hashes, and sessions are HttpOnly cookies valid for 30 days. Sign-in is rate-limited per email and network address. Every change still needs the studio's request header, which blocks cross-site requests.
+
+Settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VOICEOVER_AUTH` | `on` | `off` restores single-owner mode with no sign-in. Use it only when the studio is bound to `127.0.0.1`. |
+| `VOICEOVER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | Host names the studio answers to; add the public domain when hosting. |
+| `VOICEOVER_SECURE_COOKIES` | off | Set to `1` behind HTTPS, so session cookies are sent only over HTTPS. |
+
+The studio is not yet ready for the internet. Email verification, password reset, HTTPS and hosting are step 3 of Phase 2 in `plan.md`.
+
 ### Use the NVIDIA GPU for Chatterbox Turbo
 
 This computer has a tested GPU environment. Once the current studio has finished any recording, stop its server and run these commands from the project directory in PowerShell.

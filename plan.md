@@ -8,6 +8,15 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 
 ### Resume here
 
+**Status on 2026-11-21, evening:** the owner created the admin account with the setup code, signed up a customer and made a recording on the GPU studio. Phase 2 step 1 works end to end, including the Customers page and Disable/Enable. Follow-up from the owner's feedback: admins now see a **My recordings / Customers** switch in the Recordings list, with the customer's email on each entry. An opened customer recording shows a **Customer recording · name · email** banner with **View account**. Customer recordings are read-only for admins: the server allows only GET and DELETE, and also refuses to send them to the outbox. Earlier: Phase 2 step 1 (accounts and roles) was implemented; the inbox and approval workflow from 2026-11-20 worked for the owner. Next session:
+
+1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`). The new `tests/test_accounts.py` includes an end-to-end test covering setup, sign-up, isolation, review and disabling; report failures.
+2. Start the studio. The terminal prints a setup code: open the studio and create the admin account (the brother-in-law's or the owner's email).
+3. In a private browser window, sign up as a test customer at `/signup`. Make a short recording and check that only New recording, Recordings and Guide are visible and that engine settings are hidden.
+4. As admin, open **Customers**: the test customer and their script should be listed. Try **Disable**, then sign in as the customer again (it should be refused), then **Enable**.
+5. Then Phase 2 step 2: the voice catalog (voice profiles with consent records, adapter upload, publish, and a customer voice picker).
+
+
 **Status on 2026-11-20, late evening:** the owner's blind comparisons favored **Trained voice + reference** (step150), with Maximum resemblance a close second. It is now the default engine when a trained voice is present (roadmap step 7 done). Roadmap step 8, hands-off intake, is implemented but has not yet run on Windows (see "Hands-off intake" below). Next session:
 
 1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`). New: `tests/test_intake.py`, `tests/test_trained_voice.py`.
@@ -320,6 +329,40 @@ A typical LoRA run on 1–3 hours of audio should take a few hours on a 24 GB GP
 Run the same application and worker on a machine the owner controls. Start with owner access over a private VPN or an authenticated HTTPS reverse proxy, with persistent storage and a tested restore of the database and voice assets. Keep the worker reachable only by the app. Size the machine using measured synthesis time and storage use. Containerize when there is a target host and a verified GPU or CPU configuration.
 
 ## Phase 2 · Customer access and fulfillment
+
+### Direction · 2026-11-21
+
+The studio becomes a voice platform. The **admin** (the owner's brother-in-law, with the owner for QA and troubleshooting) creates and publishes voice models. **Customers** sign up, choose a published voice, write scripts, edit sections and download their own recordings. Owner decisions:
+
+- **One role with full control (admin).** Several admin accounts are allowed (the brother-in-law and the owner); there are no separate voice-creator tenants yet.
+- **Open customer sign-up.** Customers accept the terms at sign-up. Email verification and password reset arrive with step 3 (email sending).
+- **Immediate downloads.** Customers download as soon as a recording is ready. The admin can review every customer recording, listen, and disable an account or delete a recording if a voice is used for hurtful or illegal content. Every generation stays logged with its account, script and voice.
+- **Payment later:** a one-time fee per creation or a monthly subscription. The planned model is credits: packs bought once, plus a monthly allowance, with recordings charged by length. Payments go through Stripe Checkout and the customer portal, with idempotent webhooks.
+
+**Admin-only:**
+- voice references and transcripts
+- voice training, dataset export and blind comparisons
+- trained voices, with publishing and consent records (step 2)
+- global pronunciations
+- the inbox, approval and outbox
+- customer review and account status
+
+**Customers:**
+- New recording (script, spoken preview, their own pronunciations, delivery style)
+- their own recordings (sections, takes, regenerate, loudness, download)
+- the guide
+
+Customers never see engine names, seeds or other technical settings, and never see another account's files.
+
+**Consent and misuse:** every voice other than the admin's own needs a recorded, revocable consent from the speaker before it can be published. The terms forbid impersonation, fraud, harassment and disinformation, matching VoxCPM2's model card. Generated audio keeps the Perth watermark.
+
+**Steps:**
+1. Accounts and roles: users and sessions; sign-up, login and logout; per-user recordings; owner checks on every route; admin-only voice and training routes; per-user pronunciations; admin review with account disabling. Customers use the house voice: the admin's active reference plus the trained voice, with the admin's chosen engine. *(Implemented 2026-11-21, first Windows run pending. Details: `studio/accounts.py` uses scrypt hashes, 30-day HttpOnly SameSite=Lax session cookies with only their SHA-256 stored, and an in-memory rate limiter. The first admin is created with a setup code printed to the terminal. The `usage_log` table keeps every submitted script and section edit after deletion. Customers can have 3 active recordings. `VOICEOVER_AUTH=off` keeps single-owner mode.)*
+2. Voice catalog: voice profiles (reference, transcript, trained adapter, display name, description, consent record), adapter upload in the admin UI, publish and unpublish, and a customer voice picker.
+3. Internet readiness: hosting choice, HTTPS, email (verification and reset), rate limits and per-account quotas, fair queueing, backups and a tested restore, retention policy. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy>`, so sign-in rate limits see real client addresses instead of the proxy's. Also set `VOICEOVER_ALLOWED_HOSTS` and `VOICEOVER_SECURE_COOKIES=1`, and add a Content-Security-Policy.
+4. Billing: Stripe, credits and usage metering by audio length, plus receipts.
+
+### Earlier notes
 
 Keep the voice profile and inference worker private. Add a customer portal for account management, script submission, order status, and time-limited downloads. Add subscription entitlements and usage limits after measuring job costs and capacity. Use a payment provider for payment collection, with idempotent webhook handling. Provider fees are separate from model inference costs.
 

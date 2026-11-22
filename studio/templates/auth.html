@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{% if mode == "signup" %}Create an account{% elif mode == "setup" %}Set up the studio{% else %}Sign in{% endif %} · Voice-over Studio</title>
+  <link rel="stylesheet" href="/assets/studio.css">
+  <script src="/assets/auth.js" defer></script>
+</head>
+<body data-mode="{{ mode }}">
+  <main class="auth-page">
+    <div class="auth-card panel">
+      <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
+      {% if mode == "setup" %}
+      <h1>Set up the studio</h1>
+      <p class="muted">Create the admin account. The setup code is printed in the terminal where the studio is running.</p>
+      {% elif mode == "signup" %}
+      <h1>Create an account</h1>
+      <p class="muted">Turn your scripts into finished voice-overs. Already have an account? <a href="/login">Sign in</a></p>
+      {% else %}
+      <h1>Sign in</h1>
+      <p class="muted">New here? <a href="/signup">Create an account</a></p>
+      {% endif %}
+      <form id="auth-form" novalidate>
+        {% if mode == "setup" %}
+        <label for="code">Setup code</label>
+        <input type="text" id="code" name="code" autocomplete="off" required maxlength="64">
+        {% endif %}
+        {% if mode == "signup" %}
+        <label for="name">Name <span class="muted">(optional)</span></label>
+        <input type="text" id="name" name="name" autocomplete="name" maxlength="100">
+        {% endif %}
+        <label for="email">Email</label>
+        <input type="email" id="email" name="email" autocomplete="email" required maxlength="254">
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" required maxlength="200"
+               autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}"
+               {% if mode != "login" %}minlength="10"{% endif %}>
+        {% if mode != "login" %}<p class="muted instructions-hint">At least 10 characters. A short phrase is easiest to remember.</p>{% endif %}
+        {% if mode == "signup" %}
+        <label class="toggle terms"><input type="checkbox" id="terms" name="terms" required>
+          I will use the voices only for lawful content, and never to impersonate, deceive, harass or defame anyone.
+          Recordings are watermarked as AI-generated and can be reviewed by the studio.</label>
+        {% endif %}
+        <p id="auth-error" class="error" role="alert" hidden></p>
+        <div class="form-footer">
+          <button type="submit" class="button button-primary" id="auth-submit">
+            {% if mode == "signup" %}Create account{% elif mode == "setup" %}Create admin account{% else %}Sign in{% endif %}
+          </button>
+        </div>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

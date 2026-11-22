@@ -1,7 +1,7 @@
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import secrets
 import shutil
 from contextlib import asynccontextmanager
@@ -13,7 +13,7 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Path as PathParam, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from filelock import FileLock
 from pydantic import BaseModel, Field, StringConstraints
@@ -26,6 +26,7 @@ from .normalize import spoken_paragraphs, spoken_text
 from .quality import QualityChecker, expected_text, score as quality_score
 from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRAINED_MATCHES, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
+from .accounts import DUMMY_HASH, SESSION_COOKIE, SESSION_DAYS, RateLimiter, check_password, hash_password, new_token, normalize_email, token_hash, verify_password
 from .inbox import SCAN_SECONDS, Inbox, unique
 from .trained import find_trained
 
@@ -78,6 +79,25 @@ class JobInput(BaseModel):
     turbo_settings: TurboSettings | None = None
     voice_match: VoiceMatch = "standard"
     auto_retries: Literal[0, 1, 2] = 1
+
+
+class SignInInput(BaseModel):
+    email: Annotated[str, StringConstraints(strip_whitespace=True, max_length=254)]
+    password: Annotated[str, StringConstraints(max_length=200)]
+
+
+class SignUpInput(SignInInput):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
+    terms: bool = False
+
+
+class SetupInput(SignInInput):
+    code: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)]
+
+
+class AccountInput(BaseModel):
+    disabled: bool | None = None
+    role: Literal["admin", "customer"] | None = None
 
 
 class ComparisonInput(BaseModel):
@@ -205,7 +225,8 @@ def render_job(store, engine, directed, stop, job_id, checker=None):
     folder = store.recordings / job_id
     folder.mkdir(exist_ok=True)
     reference = store.voices / f"{job['voice_id']}.wav"
-    pairs = store.pronunciation_pairs() if hasattr(store, "pronunciation_pairs") else []
+    # Global pronunciations plus the recording owner's own (customers only have their own list).
+    pairs = store.pronunciation_pairs(job.get("user_id")) if hasattr(store, "pronunciation_pairs") else []
     checking = checker is not None and checker.available
     retries = (job.get("auto_retries") or 0) if checking else 0
     filenames = {section["number"]: section["audio"] for section in job["sections"]}
@@ -276,6 +297,20 @@ def worker(store, engine, directed, stop, checker=None):
             store.fail_job(job_id, "Generation could not finish. Check the reference and model setup, then retry.")
 
 
+def customer_view(details):
+    """A recording as a customer sees it: no engine names, model details, seeds or delivery records."""
+    hidden = ("engine", "voice_reference", "voice_transcript_ready", "trained_voice", "delivered", "approved", "source")
+    view = {key: value for key, value in details.items() if key not in hidden}
+    view["sections"] = [
+        {**{key: value for key, value in section.items() if key not in ("generation", "turbo_settings", "voice_match")},
+         "generation": {"at": section["generation"]["at"]},
+         "takes": [{key: value for key, value in take.items()
+                    if key not in ("engine", "device", "seed", "turbo_settings", "voice_match")}
+                   for take in section["takes"]]}
+        for section in details["sections"]]
+    return view
+
+
 def inbox_worker(inbox, stop):
     while not stop.wait(SCAN_SECONDS):
         try:
@@ -299,9 +334,20 @@ def local_mutation(request: Request):
         raise StudioError("Submit changes from the local studio.", 403)
 
 
-def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker=None):
+# Customers may queue this many recordings at a time.
+CUSTOMER_ACTIVE_LIMIT = 3
+# Without accounts (VOICEOVER_AUTH=off) everyone who reaches the studio is its owner: loopback only.
+LOCAL_OWNER = {"id": None, "email": "", "role": "admin", "name": "Owner", "local": True}
+
+
+def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker=None, auth=None):
     data_dir = Path(data_dir or os.environ.get("VOICEOVER_DATA_DIR", PROJECT / "data")).resolve()
     store = Store(data_dir / "studio")
+    auth_enabled = auth if auth is not None else os.environ.get("VOICEOVER_AUTH", "on").lower() != "off"
+    secure_cookies = os.environ.get("VOICEOVER_SECURE_COOKIES", "") == "1"
+    allowed_hosts = [host.strip() for host in os.environ.get("VOICEOVER_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")
+                     if host.strip()]
+    limiter = RateLimiter()
     device = os.environ.get("VOICEOVER_DEVICE", "cpu")
     directed_device = os.environ.get("VOICEOVER_DIRECTED_DEVICE", "cpu").lower()
     if directed_device not in {"cpu", "cuda"}:
@@ -327,17 +373,19 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     inbox_dir = Path(os.environ.get("VOICEOVER_INBOX") or store.root / "inbox")
     outbox_dir = Path(os.environ.get("VOICEOVER_OUTBOX") or store.root / "outbox")
 
-    def intake_job(title, script, source="inbox"):
-        """Hands-off recording with the owner's preferred setup: trained voice + reference when available."""
-        trained = current_trained()
+    def house_match():
+        """The engine for hands-off and customer recordings: trained voice + reference when available."""
         voice = store.active_voice()
-        if trained and directed.available:
-            match = "trained_reference"
-        elif directed.available and voice and voice["transcript"]:
-            match = "maximum"
-        else:
-            match = "standard"
-        return store.create_job(title, script, "", None, None, match, directed.available,
+        if current_trained() and directed.available:
+            return "trained_reference"
+        if directed.available and voice and voice["transcript"]:
+            return "maximum"
+        return "standard"
+
+    def intake_job(title, script, source="inbox"):
+        """Hands-off recording with the owner's preferred setup."""
+        trained = current_trained()
+        return store.create_job(title, script, "", None, None, house_match(), directed.available,
                                 1 if checker.available else 0, trained["name"] if trained else None, source=source)
 
     inbox = Inbox(inbox_dir, intake_job)
@@ -361,6 +409,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                     install_voice(store, reference, reference.name)
                 except (AudioError, OSError) as error:
                     app.state.reference_notice = str(error) if isinstance(error, AudioError) else "The existing reference could not be read."
+            app.state.setup_code = None
+            if auth_enabled and store.admin_count() == 0:
+                # First run: whoever has the server's terminal creates the admin account with this code.
+                app.state.setup_code = secrets.token_hex(4).upper()
+                LOG.warning("No admin account yet. Open /login and use setup code %s", app.state.setup_code)
+                print(f"\n  Voice studio setup code: {app.state.setup_code}  (open /login to create the admin account)\n", flush=True)
             stop = Event()
             model = engine if engine is not None else TurboEngine(PROJECT / "models" / "chatterbox-turbo", device)
             thread = Thread(target=worker, args=(store, model, directed, stop, checker), name="voiceover-worker", daemon=True)
@@ -380,8 +434,58 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                     intake.join()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
-    mutations = [Depends(local_mutation)]
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+    # ---- Access control ----
+
+    def current_user(request: Request):
+        if not auth_enabled:
+            return LOCAL_OWNER
+        token = request.cookies.get(SESSION_COOKIE)
+        return store.session_user(token_hash(token)) if token else None
+
+    def require_user(request: Request):
+        user = current_user(request)
+        if user is None:
+            raise StudioError("Sign in to continue.", 401)
+        return user
+
+    def require_admin(request: Request):
+        user = require_user(request)
+        if user["role"] != "admin":
+            raise StudioError("Only the studio admin can do this.", 403)
+        return user
+
+    def customer_owner(owner_id):
+        """The customer account that owns a recording, or None for the studio's own recordings."""
+        account = store.user(owner_id) if owner_id else None
+        return account if account and account["role"] == "customer" else None
+
+    def owned_job(request: Request, job_id: UUID):
+        """Customers reach only their own recordings; admins reach all. Others get 404, not 403.
+
+        Admins review customer recordings read-only: they can listen, download and delete, but not change them.
+        """
+        user = require_user(request)
+        owner = store.job_owner(job_id.hex)
+        if user["role"] != "admin":
+            if owner != user["id"]:
+                raise StudioError("Recording not found.", 404)
+        elif request.method not in ("GET", "HEAD", "DELETE") and customer_owner(owner):
+            raise StudioError("Customer recordings are read-only for admins. You can listen, download or delete them.", 403)
+        return user
+
+    def owner_id(user):
+        return None if user.get("local") else user["id"]
+
+    def customer_id(user):
+        return user["id"] if user["role"] == "customer" else None
+
+    mutations = [Depends(local_mutation), Depends(require_user)]
+    admin_only = [Depends(require_admin)]
+    admin_mutations = [Depends(local_mutation), Depends(require_admin)]
+    job_access = [Depends(owned_job)]
+    job_mutations = [Depends(local_mutation), Depends(owned_job)]
 
     @app.middleware("http")
     async def local_headers(request, call_next):
@@ -404,32 +508,155 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     async def invalid_request(_request, _error):
         return JSONResponse({"detail": "Check the required fields and length limits."}, status_code=422)
 
+    def start_session(response, user):
+        token = new_token()
+        expires = datetime.now(timezone.utc) + timedelta(days=SESSION_DAYS)
+        store.create_session(user["id"], token_hash(token), expires.isoformat(timespec="seconds"))
+        response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax",
+                            secure=secure_cookies, path="/")
+
+    def account_view(user):
+        return {"email": user["email"], "name": user["name"], "role": user["role"], "local": bool(user.get("local"))}
+
+    @app.get("/login", include_in_schema=False)
+    @app.get("/signup", include_in_schema=False)
+    def sign_in_page(request: Request):
+        if not auth_enabled or current_user(request):
+            return RedirectResponse("/", status_code=303)
+        mode = "setup" if store.admin_count() == 0 else ("signup" if request.url.path == "/signup" else "login")
+        return templates.TemplateResponse(request=request, name="auth.html", context={"mode": mode})
+
+    @app.post("/api/auth/login", dependencies=[Depends(local_mutation)])
+    def sign_in(data: SignInInput, request: Request):
+        client = request.client.host if request.client else "unknown"
+        email = data.email.strip().lower()
+        if limiter.blocked(f"email:{email}", f"ip:{client}"):
+            raise StudioError("Too many attempts. Wait 15 minutes and try again.", 429)
+        user = store.user_by_email(email)
+        valid = verify_password(data.password, user["password_hash"] if user else DUMMY_HASH)
+        if not user or not valid or user["disabled"]:
+            limiter.fail(f"email:{email}", f"ip:{client}")
+            raise StudioError("The email or password is not correct.", 401)
+        limiter.reset(f"email:{email}")
+        response = JSONResponse({"account": account_view(user)})
+        start_session(response, user)
+        return response
+
+    @app.post("/api/auth/signup", dependencies=[Depends(local_mutation)], status_code=201)
+    def sign_up(data: SignUpInput, request: Request):
+        if store.admin_count() == 0:
+            raise StudioError("The studio is not set up yet.", 409)
+        client = request.client.host if request.client else "unknown"
+        if limiter.blocked(f"signup:{client}"):
+            raise StudioError("Too many new accounts from this network. Try again later.", 429)
+        if not data.terms:
+            raise StudioError("Accept the terms of use to create an account.")
+        try:
+            email = normalize_email(data.email)
+            check_password(data.password)
+        except ValueError as error:
+            raise StudioError(str(error)) from error
+        user = store.create_user(email, hash_password(data.password), "customer", data.name, terms=True)
+        limiter.fail(f"signup:{client}")  # Counts sign-ups per network address, not failures.
+        response = JSONResponse({"account": account_view(user)}, status_code=201)
+        start_session(response, user)
+        return response
+
+    @app.post("/api/auth/setup", dependencies=[Depends(local_mutation)], status_code=201)
+    def set_up(data: SetupInput, request: Request):
+        client = request.client.host if request.client else "unknown"
+        if store.admin_count() > 0 or not app.state.setup_code:
+            raise StudioError("The studio already has an admin account.", 409)
+        if limiter.blocked(f"setup:{client}"):
+            raise StudioError("Too many attempts. Wait 15 minutes and try again.", 429)
+        if not secrets.compare_digest(data.code.upper(), app.state.setup_code):
+            limiter.fail(f"setup:{client}")
+            raise StudioError("The setup code is not correct. It is shown in the terminal running the studio.", 401)
+        try:
+            email = normalize_email(data.email)
+            check_password(data.password)
+        except ValueError as error:
+            raise StudioError(str(error)) from error
+        user = store.create_user(email, hash_password(data.password), "admin", "Admin", terms=True)
+        app.state.setup_code = None
+        response = JSONResponse({"account": account_view(user)}, status_code=201)
+        start_session(response, user)
+        return response
+
+    @app.post("/api/auth/logout", dependencies=[Depends(local_mutation)], status_code=204)
+    def sign_out(request: Request):
+        token = request.cookies.get(SESSION_COOKIE)
+        if token:
+            store.delete_session(token_hash(token))
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
+    @app.get("/api/auth/me")
+    def me(user: Annotated[dict, Depends(require_user)]):
+        return {"account": account_view(user)}
+
+    # ---- Admin: accounts and misuse review ----
+
+    @app.get("/api/admin/accounts", dependencies=admin_only)
+    def accounts():
+        return {"accounts": store.users()}
+
+    @app.put("/api/admin/accounts/{user_id}", dependencies=admin_mutations)
+    def update_account(user_id: UUID, data: AccountInput, admin: Annotated[dict, Depends(require_admin)]):
+        if user_id.hex == admin.get("id") and (data.disabled or data.role == "customer"):
+            raise StudioError("You cannot disable or demote your own account.", 409)
+        store.update_user(user_id.hex, data.disabled, data.role)
+        return {"accounts": store.users()}
+
+    @app.get("/api/admin/recordings", dependencies=admin_only)
+    def review_recordings(user: UUID | None = None):
+        return {"recordings": store.customer_recordings(user.hex if user else None)}
+
+    @app.get("/api/admin/accounts/{user_id}/usage", dependencies=admin_only)
+    def account_usage(user_id: UUID):
+        if store.user(user_id.hex) is None:
+            raise StudioError("Account not found.", 404)
+        return {"usage": store.usage(user_id.hex)}
+
     @app.get("/", include_in_schema=False)
     def home(request: Request):
+        user = current_user(request)
+        if user is None:
+            return RedirectResponse("/login", status_code=303)
+        admin = user["role"] == "admin"
         return templates.TemplateResponse(request=request, name="index.html", context={
+            "admin": admin, "account": account_view(user), "auth_enabled": auth_enabled,
+            "house_match": house_match(),
             "script_limit": SCRIPT_LIMIT, "chunk_limit": CHUNK_LIMIT, "max_pause": MAX_PAUSE_MS,
             "device": device, "directed_device": directed_device,
             "directed_available": directed.available, "instructions_limit": INSTRUCTIONS_LIMIT,
             "transcript_limit": TRANSCRIPT_LIMIT, "checks_available": checker.available,
-            "trained_voice": current_trained(),
-            "inbox": str(inbox_dir), "outbox": str(outbox_dir),
+            "trained_voice": current_trained() if admin else ({"name": "house", "step": None} if current_trained() else None),
+            "inbox": str(inbox_dir) if admin else "", "outbox": str(outbox_dir) if admin else "",
         })
 
     @app.get("/assets/{asset}")
-    def browser_asset(asset: Literal["studio.css", "studio.js"]):
-        media_type = "text/css" if asset == "studio.css" else "text/javascript"
+    def browser_asset(asset: Literal["studio.css", "studio.js", "auth.js"]):
+        media_type = "text/css" if asset.endswith(".css") else "text/javascript"
         return FileResponse(PACKAGE / "static" / asset, media_type=media_type)
 
     @app.get("/api/state")
-    def state():
-        return {**store.state(), "reference_notice": app.state.reference_notice, "trained_voice": current_trained()}
+    def state(user: Annotated[dict, Depends(require_user)]):
+        if user["role"] == "customer":
+            voice = store.active_voice()
+            house = {"id": "house", "label": "Studio voice", "duration": 0, "transcript": "ready"} if voice else None
+            return {**store.state(user["id"]), "voice": house, "voices": [], "reference_notice": None,
+                    "trained_voice": None, "account": account_view(user)}
+        return {**store.state(), "reference_notice": app.state.reference_notice, "trained_voice": current_trained(),
+                "account": account_view(user)}
 
     @app.post("/api/scripts/import", dependencies=mutations)
     def import_script(file: Annotated[UploadFile, File()]):
         contents = file.file.read(MAX_SCRIPT_FILE_BYTES + 1)
         return extract_script(file.filename or "", contents)
 
-    @app.post("/api/voice", dependencies=mutations, status_code=201)
+    @app.post("/api/voice", dependencies=admin_mutations, status_code=201)
     def enroll(audio: Annotated[UploadFile, File()],
                name: Annotated[str, Form(), StringConstraints(strip_whitespace=True, max_length=100)] = ""):
         contents = audio.file.read(MAX_REFERENCE_BYTES + 1)
@@ -452,12 +679,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             for item in data.excerpts
         ])
 
-    @app.post("/api/voice/combine/preview", dependencies=mutations)
+    @app.post("/api/voice/combine/preview", dependencies=admin_mutations)
     def preview_reference(data: ReferenceMix):
         audio, _ = build_reference(data)
         return Response(audio, media_type="audio/wav")
 
-    @app.post("/api/voice/combine", dependencies=mutations, status_code=201)
+    @app.post("/api/voice/combine", dependencies=admin_mutations, status_code=201)
     def save_combined_reference(data: ReferenceMix):
         audio, duration = build_reference(data)
         voice_id = new_id()
@@ -471,29 +698,29 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         app.state.reference_notice = None
         return result
 
-    @app.get("/api/voice/current/audio")
+    @app.get("/api/voice/current/audio", dependencies=admin_only)
     def listen_to_reference():
         voice = store.active_voice()
         if not voice:
             raise StudioError("Add a voice reference first.", 404)
         return file_response(store.voices / f"{voice['id']}.wav", "audio/wav")
 
-    @app.get("/api/voice/{voice_id}/audio")
+    @app.get("/api/voice/{voice_id}/audio", dependencies=admin_only)
     def saved_reference_audio(voice_id: UUID):
         return file_response(store.voices / f"{voice_id.hex}.wav", "audio/wav")
 
     @app.post("/api/pronunciations", dependencies=mutations, status_code=201)
-    def save_pronunciation(data: PronunciationInput):
-        return store.save_pronunciation(data.written, data.spoken)
+    def save_pronunciation(data: PronunciationInput, user: Annotated[dict, Depends(require_user)]):
+        return store.save_pronunciation(data.written, data.spoken, customer_id(user))
 
     @app.delete("/api/pronunciations/{word_id}", dependencies=mutations, status_code=204)
-    def delete_pronunciation(word_id: UUID):
-        store.delete_pronunciation(word_id.hex)
+    def delete_pronunciation(word_id: UUID, user: Annotated[dict, Depends(require_user)]):
+        store.delete_pronunciation(word_id.hex, customer_id(user))
         return Response(status_code=204)
 
     @app.post("/api/spoken-preview", dependencies=mutations)
-    def spoken_preview(data: PreviewInput):
-        pairs = store.pronunciation_pairs()
+    def spoken_preview(data: PreviewInput, user: Annotated[dict, Depends(require_user)]):
+        pairs = store.pronunciation_pairs(customer_id(user))
         return {"spoken": spoken_text(data.script, pairs), "paragraphs": spoken_paragraphs(data.script, pairs)}
 
     # ---- Training recordings ----
@@ -513,25 +740,25 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         return {"prompts": prompts, "kept_minutes": round(kept_seconds / 60, 1), "recorded": recorded,
                 "goals": list(GOALS_MINUTES), "checks_available": checker.available}
 
-    @app.get("/api/dataset")
+    @app.get("/api/dataset", dependencies=admin_only)
     def dataset():
         return dataset_view()
 
-    @app.post("/api/dataset/prompts", dependencies=mutations, status_code=201)
+    @app.post("/api/dataset/prompts", dependencies=admin_mutations, status_code=201)
     def add_prompts(data: PromptsInput):
         texts = split_prompts(data.text)
         if not texts:
             raise StudioError("Enter text with words to read.")
         return {"added": store.add_prompts(texts)}
 
-    @app.delete("/api/dataset/prompts/{prompt_id}", dependencies=mutations, status_code=204)
+    @app.delete("/api/dataset/prompts/{prompt_id}", dependencies=admin_mutations, status_code=204)
     def delete_prompt(prompt_id: PromptId):
         audio = store.delete_prompt(prompt_id)
         if audio:
             (store.dataset / "takes" / audio).unlink(missing_ok=True)
         return Response(status_code=204)
 
-    @app.post("/api/dataset/prompts/{prompt_id}/take", dependencies=mutations, status_code=201)
+    @app.post("/api/dataset/prompts/{prompt_id}/take", dependencies=admin_mutations, status_code=201)
     def record_take(prompt_id: PromptId,
                     audio: Annotated[UploadFile, File()]):
         import soundfile as sf
@@ -569,17 +796,17 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             (store.dataset / "takes" / previous).unlink(missing_ok=True)
         return {"id": take_id, "duration": stats["duration"], "kept": result["status"] != "review", "check": result}
 
-    @app.get("/api/dataset/takes/{take_id}/audio")
+    @app.get("/api/dataset/takes/{take_id}/audio", dependencies=admin_only)
     def dataset_take_audio(take_id: UUID):
         take = store.dataset_take(take_id.hex)
         return file_response(store.dataset / "takes" / take["audio"], "audio/wav")
 
-    @app.put("/api/dataset/takes/{take_id}/kept", dependencies=mutations)
+    @app.put("/api/dataset/takes/{take_id}/kept", dependencies=admin_mutations)
     def keep_take(take_id: UUID, data: KeptInput):
         store.set_take_kept(take_id.hex, data.kept)
         return {"id": take_id.hex, "kept": data.kept}
 
-    @app.post("/api/dataset/export", dependencies=mutations)
+    @app.post("/api/dataset/export", dependencies=admin_mutations)
     def export_training_set():
         takes = [(store.dataset / "takes" / row["audio"], row["text"]) for row in store.kept_takes()]
         takes = [(path, text) for path, text in takes if path.is_file()]
@@ -592,21 +819,26 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             LOG.error("Training set export failed")
             raise
 
-    @app.put("/api/voice/{voice_id}/transcript", dependencies=mutations)
+    @app.put("/api/voice/{voice_id}/transcript", dependencies=admin_mutations)
     def save_transcript(voice_id: UUID, data: TranscriptInput):
         return store.set_transcript(voice_id.hex, " ".join(data.transcript.split()))
 
-    @app.put("/api/voice/{voice_id}/active", dependencies=mutations)
+    @app.put("/api/voice/{voice_id}/active", dependencies=admin_mutations)
     def activate_voice(voice_id: UUID):
         return store.activate_voice(voice_id.hex)
 
     @app.post("/api/jobs", dependencies=mutations, status_code=202)
-    def create_job(data: JobInput):
+    def create_job(data: JobInput, user: Annotated[dict, Depends(require_user)]):
+        customer = user["role"] == "customer"
+        voice_match = house_match() if customer else data.voice_match
+        if customer and store.active_jobs(user["id"]) >= CUSTOMER_ACTIVE_LIMIT:
+            raise StudioError(f"You already have {CUSTOMER_ACTIVE_LIMIT} recordings in progress. "
+                              "Wait for one to finish, then try again.", 429)
         prepared = None
         if data.sections is not None:
             prepared = [{"text": item.text, "instructions": item.instructions or "",
                          "pause_ms": PARAGRAPH_PAUSE_MS if item.pause_ms is None else item.pause_ms,
-                         "voice_match": item.voice_match or data.voice_match}
+                         "voice_match": voice_match if customer else (item.voice_match or data.voice_match)}
                         for item in data.sections]
             combined = "\n\n".join(item["text"] for item in prepared)
             if len(combined) > SCRIPT_LIMIT:
@@ -617,17 +849,20 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         else:
             validate_directions(data.script, data.instructions, directed.available)
             script = data.script
-        settings = data.turbo_settings.model_dump() if data.turbo_settings else None
+        # Customers use the studio voice with the admin's settings; engine options are for the admin.
+        settings = data.turbo_settings.model_dump() if data.turbo_settings and not customer else None
         trained = current_trained()
+        retries = (1 if checker.available else 0) if customer else data.auto_retries
         return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings,
-                                       data.voice_match, directed.available, data.auto_retries,
-                                       trained["name"] if trained else None)}
+                                       voice_match, directed.available, retries,
+                                       trained["name"] if trained else None, user_id=owner_id(user),
+                                       voice_label="Studio voice" if customer else None)}
 
-    @app.get("/api/comparisons")
+    @app.get("/api/comparisons", dependencies=admin_only)
     def comparisons():
         return {"comparisons": store.comparisons(), "trained_voice": current_trained()}
 
-    @app.post("/api/comparisons", dependencies=mutations, status_code=202)
+    @app.post("/api/comparisons", dependencies=admin_mutations, status_code=202)
     def create_comparison(data: ComparisonInput):
         if data.baseline == data.contender:
             raise StudioError("Choose two different voice engines to compare.")
@@ -642,7 +877,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                                        data.baseline, directed.available, 0,
                                        trained["name"] if trained else None, blind=True)}
 
-    @app.put("/api/comparisons/{job_id}", dependencies=mutations)
+    @app.put("/api/comparisons/{job_id}", dependencies=admin_mutations)
     def choose_comparison(job_id: UUID, data: ChoiceInput):
         store.choose_blind(job_id.hex, data.choice)
         return {"comparisons": store.comparisons()}
@@ -652,11 +887,11 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         sections = split_script_with_pauses(data.script)
         return {"sections": [text for text, _ in sections], "pauses": [pause for _, pause in sections]}
 
-    @app.get("/api/jobs/{job_id}")
-    def job_details(job_id: UUID):
+    @app.get("/api/jobs/{job_id}", dependencies=job_access)
+    def job_details(job_id: UUID, user: Annotated[dict, Depends(require_user)]):
         job = store.job(job_id.hex)
-        pairs = store.pronunciation_pairs()
-        return {
+        pairs = store.pronunciation_pairs(job["user_id"])  # Admins' own words are global, so this is safe for them.
+        details = {
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
             "voice_reference": job["voice_label"],
             "voice_transcript_ready": bool(job["voice_transcript"]),
@@ -683,43 +918,51 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                                     for take in section["takes"]]}
                          for section in job["sections"]],
         }
+        if user["role"] == "customer":
+            return customer_view(details)
+        owner = customer_owner(job["user_id"])
+        details["owner"] = ({"id": owner["id"], "email": owner["email"], "name": owner["name"],
+                             "disabled": bool(owner["disabled"])} if owner else None)
+        details["read_only"] = owner is not None
+        return details
 
-    @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=mutations, status_code=202)
-    def regenerate(job_id: UUID, number: int, data: SectionInput):
-        settings = data.turbo_settings.model_dump() if data.turbo_settings else None
+    @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=job_mutations, status_code=202)
+    def regenerate(job_id: UUID, number: int, data: SectionInput, user: Annotated[dict, Depends(require_user)]):
+        customer = user["role"] == "customer"
+        settings = data.turbo_settings.model_dump() if data.turbo_settings and not customer else None
         trained = current_trained()
-        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings, data.voice_match,
-                         trained["name"] if trained else None)
+        store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings,
+                         house_match() if customer else data.voice_match, trained["name"] if trained else None)
         return {"id": job_id.hex}
 
-    @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=mutations, status_code=202)
+    @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=job_mutations, status_code=202)
     def update_pause(job_id: UUID, number: int, data: PauseInput):
         store.adjust_pause(job_id.hex, number, data.pause_ms)
         return {"id": job_id.hex}
 
-    @app.post("/api/jobs/{job_id}/retry", dependencies=mutations, status_code=202)
+    @app.post("/api/jobs/{job_id}/retry", dependencies=job_mutations, status_code=202)
     def retry(job_id: UUID):
         store.retry(job_id.hex)
         return {"id": job_id.hex}
 
-    @app.put("/api/jobs/{job_id}/loudness", dependencies=mutations, status_code=202)
+    @app.put("/api/jobs/{job_id}/loudness", dependencies=job_mutations, status_code=202)
     def update_loudness(job_id: UUID, data: LoudnessInput):
         store.set_loudness(job_id.hex, None if data.target is None else float(data.target))
         return {"id": job_id.hex}
 
-    @app.post("/api/jobs/{job_id}/check", dependencies=mutations, status_code=202)
+    @app.post("/api/jobs/{job_id}/check", dependencies=job_mutations, status_code=202)
     def check_recording(job_id: UUID):
         if not checker.available:
             raise StudioError("Set up automatic checks using the README first.", 409)
         store.request_check(job_id.hex)
         return {"id": job_id.hex}
 
-    @app.post("/api/jobs/{job_id}/balance", dependencies=mutations, status_code=202)
+    @app.post("/api/jobs/{job_id}/balance", dependencies=job_mutations, status_code=202)
     def balance(job_id: UUID):
         store.rebuild(job_id.hex)
         return {"id": job_id.hex}
 
-    @app.get("/api/jobs/{job_id}/sections/{number}/audio")
+    @app.get("/api/jobs/{job_id}/sections/{number}/audio", dependencies=job_access)
     def section_audio(job_id: UUID, number: int):
         job = store.job(job_id.hex)
         for section in job["sections"]:
@@ -730,7 +973,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
                 return file_response(balanced_section(path), "audio/wav")
         raise StudioError("This section has no audio yet.", 404)
 
-    @app.get("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/audio")
+    @app.get("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/audio", dependencies=job_access)
     def take_audio(job_id: UUID, number: int, take_id: UUID):
         take = store.take(job_id.hex, number, take_id.hex)
         path = store.recordings / job_id.hex / take["audio"]
@@ -738,12 +981,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             raise StudioError("This take's audio file could not be found.", 404)
         return file_response(balanced_section(path), "audio/wav")
 
-    @app.post("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/restore", dependencies=mutations, status_code=202)
+    @app.post("/api/jobs/{job_id}/sections/{number}/takes/{take_id}/restore", dependencies=job_mutations, status_code=202)
     def restore_take(job_id: UUID, number: int, take_id: UUID):
         store.restore_take(job_id.hex, number, take_id.hex)
         return {"id": job_id.hex}
 
-    @app.get("/api/jobs/{job_id}/export/{kind}")
+    @app.get("/api/jobs/{job_id}/export/{kind}", dependencies=job_access)
     def audio_export(job_id: UUID, kind: Literal["wav", "mp3"], download: bool = False):
         job = store.job(job_id.hex)
         if not job["export"]:
@@ -753,10 +996,12 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         return file_response(store.recordings / job_id.hex / f"{job['export']}.{kind}", media_type,
                              f"{safe_title}.{kind}" if download else None)
 
-    @app.post("/api/jobs/{job_id}/approve", dependencies=mutations)
+    @app.post("/api/jobs/{job_id}/approve", dependencies=admin_mutations)
     def approve(job_id: UUID):
         """Approve the current export and copy its WAV and MP3 to the outbox folder."""
         job = store.job(job_id.hex)
+        if customer_owner(job["user_id"]):
+            raise StudioError("Customer recordings are delivered to the customer, not to the outbox.", 403)
         if job["status"] != "ready" or not job["export"]:
             raise StudioError("Wait for the recording to finish before approving it.", 409)
         folder = store.recordings / job_id.hex
@@ -778,7 +1023,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             raise
         return {"delivered": [target.name for target in delivered], "outbox": str(outbox_dir)}
 
-    @app.post("/api/intake", dependencies=mutations, status_code=202)
+    @app.post("/api/intake", dependencies=admin_mutations, status_code=202)
     def intake_file(file: Annotated[UploadFile, File()],
                     title: Annotated[str, Form(), StringConstraints(strip_whitespace=True, max_length=100)] = ""):
         """For other apps on this computer: a script file becomes a recording awaiting approval."""
@@ -787,7 +1032,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         name = title or Path(file.filename or "").stem[:100] or "API recording"
         return {"id": intake_job(name, script, source="api")}
 
-    @app.delete("/api/jobs/{job_id}", dependencies=mutations, status_code=204)
+    @app.delete("/api/jobs/{job_id}", dependencies=job_mutations, status_code=204)
     def delete_job(job_id: UUID):
         store.delete(job_id.hex)
         folder = store.recordings / job_id.hex

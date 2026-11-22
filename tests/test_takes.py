@@ -51,7 +51,7 @@ class TakeTests(unittest.TestCase):
             write_wav(root / "reference.wav", seconds=7)
             engine = FakeEngine()
             headers = {"X-Studio-Request": "1"}
-            with TestClient(create_app(root, engine), base_url="http://localhost") as client:
+            with TestClient(create_app(root, engine, auth=False), base_url="http://localhost") as client:
                 response = client.post("/api/jobs", headers=headers, json={"script": "First version."})
                 self.assertEqual(response.status_code, 202)
                 route = f"/api/jobs/{response.json()['id']}"
@@ -79,7 +79,7 @@ class TakeTests(unittest.TestCase):
                 self.assertEqual(restored["sections"][0]["text"], "First version.")
                 self.assertEqual(client.get(route + "/export/wav").content, original_wav)
                 self.assertEqual(engine.calls, 3)
-            with TestClient(create_app(root, FakeEngine()), base_url="http://localhost") as client:
+            with TestClient(create_app(root, FakeEngine(), auth=False), base_url="http://localhost") as client:
                 restarted = client.get(route).json()
                 self.assertEqual(len(restarted["sections"][0]["takes"]), 2)
                 self.assertEqual(restarted["sections"][0]["text"], "First version.")

@@ -85,7 +85,7 @@ class OriginalReferenceTests(unittest.TestCase):
                 audio.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
                 tone = np.repeat(self.tone(7), 2)
                 audio.writeframes(tone.astype("<i2").tobytes())
-            with TestClient(create_app(root, FakeEngine()), base_url="http://localhost") as client:
+            with TestClient(create_app(root, FakeEngine(), auth=False), base_url="http://localhost") as client:
                 response = client.post("/api/voice", files={"audio": ("me.wav", source.read_bytes(), "audio/wav")},
                                        headers={"X-Studio-Request": "1"})
                 self.assertEqual(response.status_code, 201, response.text)

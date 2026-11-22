@@ -49,7 +49,7 @@ class TurboSettingsTests(unittest.TestCase):
             headers = {"X-Studio-Request": "1"}
             settings = {"seed": 123, "temperature": 1.05, "top_p": 0.7, "top_k": 45,
                         "repetition_penalty": 1.4, "normalize_reference": False}
-            with TestClient(create_app(root, engine), base_url="http://localhost") as client:
+            with TestClient(create_app(root, engine, auth=False), base_url="http://localhost") as client:
                 response = client.post("/api/jobs", headers=headers,
                                        json={"script": "First version.", "turbo_settings": settings})
                 self.assertEqual(response.status_code, 202, response.text)

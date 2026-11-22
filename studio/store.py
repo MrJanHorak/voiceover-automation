@@ -242,6 +242,42 @@ class Store:
                     written TEXT NOT NULL UNIQUE COLLATE NOCASE,
                     spoken TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK (role IN ('admin', 'customer')),
+                    name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    terms_accepted_at TEXT,
+                    last_login_at TEXT,
+                    disabled INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                -- A customer's own pronunciations; the global list in pronunciations applies to everyone.
+                CREATE TABLE IF NOT EXISTS user_pronunciations (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    written TEXT NOT NULL COLLATE NOCASE,
+                    spoken TEXT NOT NULL,
+                    UNIQUE (user_id, written)
+                );
+                -- Every script submitted for generation, kept when a recording is deleted, so the admin can
+                -- review misuse; later also the basis for usage billing.
+                CREATE TABLE IF NOT EXISTS usage_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    job_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    voice TEXT,
+                    created_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS section_takes (
                     id TEXT PRIMARY KEY,
                     job_id TEXT NOT NULL,
@@ -319,6 +355,9 @@ class Store:
                 db.execute("ALTER TABLE jobs ADD COLUMN approved_export TEXT")
             if "delivered" not in job_columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN delivered TEXT")
+            if "user_id" not in job_columns:
+                # NULL: made by the studio owner (local mode, inbox or before accounts existed).
+                db.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -463,25 +502,38 @@ class Store:
             self.select_voice(db, voice_id)
             return dict(voice)
 
-    def state(self):
+    def state(self, customer_id=None):
+        """Studio state. With customer_id, only that customer's recordings and pronunciations."""
         with self.connect() as db:
             db.execute("BEGIN")
-            jobs = db.execute("""
+            owner = ("user_id = ?", (customer_id,)) if customer_id else (
+                "(user_id IS NULL OR user_id IN (SELECT id FROM users WHERE role = 'admin'))", ())
+            jobs = db.execute(f"""
                 SELECT id, title, status, created_at, source,
                        CASE WHEN source != 'studio' AND status = 'ready' AND export IS NOT NULL
                             AND (approved_export IS NULL OR approved_export != export) THEN 1 ELSE 0 END AS awaiting_approval
-                FROM jobs WHERE blind = 0 ORDER BY rowid DESC
-            """).fetchall()
+                FROM jobs WHERE blind = 0 AND {owner[0]} ORDER BY rowid DESC
+            """, owner[1]).fetchall()
+            if customer_id:
+                words = db.execute("SELECT id, written, spoken FROM user_pronunciations WHERE user_id = ? "
+                                   "ORDER BY written COLLATE NOCASE", (customer_id,)).fetchall()
+                return {"jobs": [dict(job) for job in jobs], "pronunciations": [dict(word) for word in words]}
             voices = db.execute("SELECT * FROM voices ORDER BY rowid DESC").fetchall()
             words = db.execute("SELECT * FROM pronunciations ORDER BY written COLLATE NOCASE").fetchall()
             return {"voice": self.active_voice(db), "voices": [dict(voice) for voice in voices],
                     "jobs": [dict(job) for job in jobs], "pronunciations": [dict(word) for word in words]}
 
-    def pronunciation_pairs(self):
+    def pronunciation_pairs(self, user_id=None):
+        """Global pronunciations, overridden by the customer's own when user_id is given."""
         with self.connect() as db:
-            return [(row["written"], row["spoken"]) for row in db.execute("SELECT written, spoken FROM pronunciations")]
+            pairs = {row["written"].lower(): (row["written"], row["spoken"])
+                     for row in db.execute("SELECT written, spoken FROM pronunciations")}
+            if user_id:
+                for row in db.execute("SELECT written, spoken FROM user_pronunciations WHERE user_id = ?", (user_id,)):
+                    pairs[row["written"].lower()] = (row["written"], row["spoken"])
+            return list(pairs.values())
 
-    def save_pronunciation(self, written, spoken):
+    def save_pronunciation(self, written, spoken, user_id=None):
         written, spoken = " ".join(written.split()), " ".join(spoken.split())
         if not re.search(r"\w", written) or not spoken:
             raise StudioError("Enter the written word and how to say it.")
@@ -489,6 +541,18 @@ class Store:
             raise StudioError("Shorten the word or its pronunciation.")
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            if user_id:
+                existing = db.execute("SELECT id FROM user_pronunciations WHERE user_id = ? AND written = ?",
+                                      (user_id, written)).fetchone()
+                if existing is None and db.execute("SELECT COUNT(*) FROM user_pronunciations WHERE user_id = ?",
+                                                   (user_id,)).fetchone()[0] >= 500:
+                    raise StudioError("Your pronunciation list is full. Delete words you no longer need.")
+                word_id = existing["id"] if existing else new_id()
+                db.execute("""
+                    INSERT INTO user_pronunciations (id, user_id, written, spoken) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET written = excluded.written, spoken = excluded.spoken
+                """, (word_id, user_id, written, spoken))
+                return {"id": word_id, "written": written, "spoken": spoken}
             existing = db.execute("SELECT id FROM pronunciations WHERE written = ?", (written,)).fetchone()
             word_id = existing["id"] if existing else new_id()
             db.execute("""
@@ -497,14 +561,18 @@ class Store:
             """, (word_id, written, spoken))
             return {"id": word_id, "written": written, "spoken": spoken}
 
-    def delete_pronunciation(self, word_id):
+    def delete_pronunciation(self, word_id, user_id=None):
         with self.connect() as db:
-            if db.execute("DELETE FROM pronunciations WHERE id = ?", (word_id,)).rowcount == 0:
+            if user_id:
+                deleted = db.execute("DELETE FROM user_pronunciations WHERE id = ? AND user_id = ?", (word_id, user_id)).rowcount
+            else:
+                deleted = db.execute("DELETE FROM pronunciations WHERE id = ?", (word_id,)).rowcount
+            if deleted == 0:
                 raise StudioError("Pronunciation not found.", 404)
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
                    voice_match="standard", directed_available=False, auto_retries=0, trained_voice=None,
-                   blind=False, source="studio"):
+                   blind=False, source="studio", user_id=None, voice_label=None):
         if auto_retries not in (0, 1, 2):
             raise StudioError("Choose 0, 1 or 2 automatic retries.")
         sections = prepared_sections if prepared_sections is not None else [
@@ -527,11 +595,13 @@ class Store:
             uses_trained = any(section["voice_match"] in TRAINED_MATCHES for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
-                                  master_rate, loudness_target, auto_retries, trained_voice, blind, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                                  master_rate, loudness_target, auto_retries, trained_voice, blind, source, user_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
                   now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries,
-                  trained_voice if uses_trained else None, int(blind), source))
+                  trained_voice if uses_trained else None, int(blind), source, user_id))
+            db.execute("INSERT INTO usage_log (user_id, job_id, kind, text, voice, created_at) VALUES (?, ?, 'create', ?, ?, ?)",
+                       (user_id, job_id, script, voice_label or voice["label"], now()))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
             def selected_seed(section):
                 if section["instructions"] or section["voice_match"] != "standard":
@@ -598,6 +668,118 @@ class Store:
             if job["blind_choice"]:
                 raise StudioError("This comparison already has a choice.", 409)
             db.execute("UPDATE jobs SET blind_choice = ? WHERE id = ?", (choice, job_id))
+
+    # ---- Accounts ----
+
+    def admin_count(self):
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0").fetchone()[0]
+
+    def create_user(self, email, password_hash, role="customer", name="", terms=False):
+        if role not in ("admin", "customer"):
+            raise StudioError("Choose a valid role.")
+        user_id = new_id()
+        with self.connect() as db:
+            try:
+                db.execute("""
+                    INSERT INTO users (id, email, password_hash, role, name, created_at, terms_accepted_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (user_id, email, password_hash, role, name, now(), now() if terms else None))
+            except sqlite3.IntegrityError as error:
+                raise StudioError("An account with this email already exists. Sign in instead.", 409) from error
+        return self.user(user_id)
+
+    def user(self, user_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            return dict(row) if row else None
+
+    def user_by_email(self, email):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+            return dict(row) if row else None
+
+    def users(self):
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT u.id, u.email, u.role, u.name, u.created_at, u.last_login_at, u.disabled,
+                       (SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id) AS recordings,
+                       (SELECT COUNT(*) FROM usage_log l WHERE l.user_id = u.id) AS generations
+                FROM users u ORDER BY u.rowid DESC
+            """).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_user(self, user_id, disabled=None, role=None):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            user = db.execute("SELECT role, disabled FROM users WHERE id = ?", (user_id,)).fetchone()
+            if user is None:
+                raise StudioError("Account not found.", 404)
+            new_role = role or user["role"]
+            new_disabled = user["disabled"] if disabled is None else int(disabled)
+            if role is not None and role not in ("admin", "customer"):
+                raise StudioError("Choose a valid role.")
+            if user["role"] == "admin" and (new_role != "admin" or new_disabled):
+                admins = db.execute("SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?",
+                                    (user_id,)).fetchone()[0]
+                if admins == 0:
+                    raise StudioError("Keep at least one active admin account.", 409)
+            db.execute("UPDATE users SET role = ?, disabled = ? WHERE id = ?", (new_role, new_disabled, user_id))
+            if new_disabled:
+                db.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+                db.execute("UPDATE jobs SET status = 'failed', error = 'This account is disabled.' "
+                           "WHERE user_id = ? AND status = 'queued'", (user_id,))
+        return self.user(user_id)
+
+    def create_session(self, user_id, token_hash, expires_at):
+        with self.connect() as db:
+            db.execute("DELETE FROM sessions WHERE expires_at < ?", (now(),))
+            db.execute("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                       (token_hash, user_id, now(), expires_at))
+            db.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (now(), user_id))
+
+    def session_user(self, token_hash):
+        with self.connect() as db:
+            row = db.execute("""
+                SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+                WHERE s.token_hash = ? AND s.expires_at > ? AND u.disabled = 0
+            """, (token_hash, now())).fetchone()
+            return dict(row) if row else None
+
+    def delete_session(self, token_hash):
+        with self.connect() as db:
+            db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+    def job_owner(self, job_id):
+        """The account a recording belongs to (None for the studio owner); 404 when it does not exist."""
+        with self.connect() as db:
+            return self.get_job(db, job_id)["user_id"]
+
+    def active_jobs(self, user_id):
+        with self.connect() as db:
+            return db.execute("SELECT COUNT(*) FROM jobs WHERE user_id = ? AND status IN ('queued', 'running')",
+                              (user_id,)).fetchone()[0]
+
+    def customer_recordings(self, user_id=None, limit=200):
+        """Recent customer recordings with their scripts, for the admin's misuse review."""
+        with self.connect() as db:
+            where, values = ("WHERE j.user_id = ?", (user_id,)) if user_id else (
+                "WHERE j.user_id IN (SELECT id FROM users WHERE role = 'customer')", ())
+            rows = db.execute(f"""
+                SELECT j.id, j.title, j.status, j.created_at, j.script, u.email, u.id AS user_id, u.disabled
+                FROM jobs j JOIN users u ON u.id = j.user_id {where} ORDER BY j.rowid DESC LIMIT ?
+            """, (*values, limit)).fetchall()
+            return [dict(row) for row in rows]
+
+    def usage(self, user_id, limit=200):
+        """Everything an account submitted, including scripts of recordings it has since deleted."""
+        with self.connect() as db:
+            rows = db.execute("""
+                SELECT job_id, kind, text, voice, created_at,
+                       EXISTS (SELECT 1 FROM jobs WHERE jobs.id = usage_log.job_id) AS still_exists
+                FROM usage_log WHERE user_id = ? ORDER BY id DESC LIMIT ?
+            """, (user_id, limit)).fetchall()
+            return [dict(row) for row in rows]
 
     @staticmethod
     def get_job(db, job_id):
@@ -778,6 +960,8 @@ class Store:
                 UPDATE sections SET text = ?, instructions = ?, seed = ?, turbo_settings = ?, voice_match = ?, pending = 1
                 WHERE job_id = ? AND number = ?
             """, (text, instructions, seed, settings_json, voice_match, job_id, number))
+            db.execute("INSERT INTO usage_log (user_id, job_id, kind, text, voice, created_at) VALUES (?, ?, 'regenerate', ?, ?, ?)",
+                       (job["user_id"], job_id, text, voice_match, now()))
             db.execute("UPDATE jobs SET status = 'queued', error = NULL WHERE id = ?", (job_id,))
 
     def adjust_pause(self, job_id, number, pause_ms):

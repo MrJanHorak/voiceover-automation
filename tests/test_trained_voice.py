@@ -176,9 +176,10 @@ class TrainedRoutingTests(unittest.TestCase):
     def test_trained_sections_use_the_adapter(self):
         calls, finished = self.run_job([("Alone.", "", "trained"), ("With clip.", "", "trained_reference"),
                                         ("Calm.", "Calm", "trained"), ("Fast.", "", "standard")])
-        self.assertEqual(calls, [("turbo", "Fast."), ("trained", "Alone.", False, "step150"),
+        # Script order: only engines that need the GPU exclusively get Chatterbox sections first.
+        self.assertEqual(calls, [("trained", "Alone.", False, "step150"),
                                  ("trained", "With clip.", True, "step150"),
-                                 ("directed", "Calm.", False, "Calm", "step150")])
+                                 ("directed", "Calm.", False, "Calm", "step150"), ("turbo", "Fast.")])
         self.assertEqual(finished[1]["engine"], "VoxCPM2 · trained voice step150")
         self.assertEqual(finished[2]["engine"], "VoxCPM2 · trained voice step150 + reference")
 
@@ -264,7 +265,7 @@ class ComparisonApiTests(unittest.TestCase):
             make_adapter(root / "studio" / "trained" / "step150")
             directed = FakeDirected()
             headers = {"X-Studio-Request": "1"}
-            with TestClient(create_app(root, FakeEngine(), directed), base_url="http://localhost") as client:
+            with TestClient(create_app(root, FakeEngine(), directed, auth=False), base_url="http://localhost") as client:
                 same = client.post("/api/comparisons", headers=headers,
                                    json={"text": "Same line.", "baseline": "trained", "contender": "trained"})
                 self.assertEqual(same.status_code, 400)

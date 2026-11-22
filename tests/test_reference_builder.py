@@ -19,7 +19,7 @@ def reference(path, sample):
 class ReferenceBuilderTests(unittest.TestCase):
     def test_preview_save_and_validate_excerpts(self):
         with TemporaryDirectory(dir=".tools") as folder:
-            app = create_app(Path(folder), engine=object())
+            app = create_app(Path(folder), engine=object(), auth=False)
             with TestClient(app, base_url="http://localhost") as client:
                 # Populate the same private store that the application opened.
                 from studio.store import Store

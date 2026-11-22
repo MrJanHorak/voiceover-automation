@@ -5,6 +5,10 @@ const chunkLimit = Number(document.body.dataset.chunkLimit);
 const maxPause = Number(document.body.dataset.maxPause);
 const directedAvailable = document.body.dataset.directedAvailable === "true";
 const trainedVoice = document.body.dataset.trainedVoice || "";
+// Customers see only the recording workflow; the server enforces the same split.
+const isAdmin = document.body.dataset.admin === "true";
+const authEnabled = document.body.dataset.auth === "true";
+const houseMatch = document.body.dataset.houseMatch || "standard";
 const usesVoxcpm = (match) => match !== "standard";
 const statusNames = { queued: "Queued", running: "Generating", ready: "Ready", failed: "Failed" };
 
@@ -41,7 +45,8 @@ let reviewFilter = "all";
 const sectionSelection = new Map();
 const takeSelection = new Map();
 const openMore = new Set();
-const views = ["create", "recordings", "voice", "training", "guide"];
+const views = isAdmin ? ["create", "recordings", "voice", "training", ...(authEnabled ? ["customers"] : []), "guide"]
+  : ["create", "recordings", "guide"];
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
   repetition_penalty: 1.2, normalize_reference: true };
@@ -63,6 +68,9 @@ async function request(url, options = {}) {
   const response = await fetch(url, options);
   if (response.status === 204) return null;
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && authEnabled) {
+    window.location.replace("/login");
+  }
   if (!response.ok) {
     const error = new Error(data.detail || "The studio could not complete the request.");
     error.status = response.status;
@@ -93,6 +101,7 @@ function showView(name, { remember = true } = {}) {
     loadDataset();
     loadComparisons();
   }
+  if (currentView === "customers") loadCustomers();
   window.scrollTo({ top: 0 });
 }
 
@@ -109,6 +118,7 @@ function setStep(step) {
 }
 
 function matchReady(instructions, match) {
+  if (!isAdmin) return Boolean(state.voice);  // Customers always use the studio voice.
   // A trained voice also applies to sections with a delivery style; maximum resemblance does not.
   if (match === "trained" || match === "trained_reference") return directedAvailable && Boolean(trainedVoice);
   return instructions.trim() || match !== "maximum" || (directedAvailable && Boolean(state.voice?.transcript));
@@ -135,14 +145,19 @@ function voiceMatchEditor(id, value, readOnly = false) {
   const box = byId("voice-engine").content.firstElementChild.cloneNode(true);
   const field = box.querySelector("select");
   field.id = id;
-  field.value = value || "standard";
+  field.value = value || (isAdmin ? "standard" : houseMatch);
   field.disabled = readOnly;
+  if (!isAdmin) {
+    field.value = houseMatch;
+    box.hidden = true;
+  }
   box.querySelector("label").htmlFor = id;
   return { box, field };
 }
 
 function advancedEditor(prefix, values, onChange, readOnly = false) {
   const box = element("details", "advanced-settings");
+  box.hidden = !isAdmin;
   box.append(element("summary", "", "Advanced Chatterbox settings"));
   box.append(element("p", "muted advanced-intro", "Applies to Chatterbox sections only. Sections with special instructions use VoxCPM2. Change one setting at a time and listen to the result."));
   const controls = {};
@@ -197,6 +212,8 @@ function advancedEditor(prefix, values, onChange, readOnly = false) {
 function cuePicker(field, errorId) {
   const picker = byId("delivery-cues").content.firstElementChild.cloneNode(true);
   picker.disabled = field.readOnly;
+  // Sound cues work only with Chatterbox; customers never see a control that cannot work for them.
+  picker.hidden = !isAdmin && usesVoxcpm(houseMatch);
   picker.addEventListener("change", () => {
     const cue = picker.value;
     picker.value = "";
@@ -241,6 +258,10 @@ function renderVoice() {
   const signature = JSON.stringify([state.voice, state.voices, state.reference_notice]);
   if (signature === voiceSignature) return;
   voiceSignature = signature;
+  if (!isAdmin) {
+    byId("settings-voice").textContent = state.voice ? state.voice.label : "Not available yet. Try again later.";
+    return;
+  }
   const voice = state.voice;
   const audio = byId("voice-audio");
   const menu = byId("voice-selection");
@@ -751,12 +772,38 @@ function badge(node, status) {
   node.textContent = statusNames[status];
 }
 
+// Admins switch the list between their own recordings and customers' recordings.
+let historyScope = "mine";
+let customerJobs = [];
+
+async function loadCustomerJobs() {
+  if (historyScope !== "customers") return;
+  try {
+    customerJobs = (await request("/api/admin/recordings")).recordings;
+  } catch (error) {
+    errorAt("result-error", error.message);
+  }
+}
+
+async function setHistoryScope(scope) {
+  historyScope = scope;
+  byId("scope-mine")?.setAttribute("aria-pressed", String(scope === "mine"));
+  byId("scope-customers")?.setAttribute("aria-pressed", String(scope === "customers"));
+  await loadCustomerJobs();
+  renderHistory();
+}
+
+byId("scope-mine")?.addEventListener("click", () => setHistoryScope("mine"));
+byId("scope-customers")?.addEventListener("click", () => setHistoryScope("customers"));
+
 function renderHistory() {
-  const signature = JSON.stringify([selected, state.jobs]);
+  const listed = historyScope === "customers" ? customerJobs : state.jobs;
+  const signature = JSON.stringify([selected, historyScope, listed]);
   if (historySignature === signature) return;
   historySignature = signature;
-  byId("history-empty").hidden = state.jobs.length > 0;
-  const items = state.jobs.map((entry) => {
+  byId("history-empty").hidden = listed.length > 0;
+  byId("history-empty").textContent = historyScope === "customers" ? "No customer recordings yet." : "Your recordings will appear here.";
+  const items = listed.map((entry) => {
     const row = element("li");
     const open = element("button", "button button-quiet history-select");
     open.type = "button";
@@ -764,7 +811,9 @@ function renderHistory() {
     open.addEventListener("click", () => selectJob(entry.id));
     const status = element("span", "status");
     badge(status, entry.status);
-    open.append(element("span", "history-name", entry.title), status);
+    const name = element("span", "history-name", entry.title);
+    if (entry.email) name.append(element("span", "history-owner", entry.email));
+    open.append(name, status);
     if (entry.awaiting_approval) open.append(element("span", "approval-tag", "Approve"));
     row.append(open);
     const remove = element("button", "button button-quiet remove-job", "×");
@@ -772,12 +821,14 @@ function renderHistory() {
     remove.setAttribute("aria-label", `Delete ${entry.title}`);
     remove.disabled = ["queued", "running"].includes(entry.status);
     remove.addEventListener("click", async () => {
-      if (!window.confirm(`Delete “${entry.title}” and its audio files?`)) return;
+      const whose = entry.email ? ` by ${entry.email}` : "";
+      if (!window.confirm(`Delete “${entry.title}”${whose} and its audio files? The script stays in the review log.`)) return;
       remove.disabled = true;
       try {
         await change(`/api/jobs/${entry.id}`, { method: "DELETE" });
         state.jobs = state.jobs.filter((saved) => saved.id !== entry.id);
-        if (selected === entry.id) await selectJob(state.jobs[0]?.id ?? null);
+        customerJobs = customerJobs.filter((saved) => saved.id !== entry.id);
+        if (selected === entry.id) await selectJob((historyScope === "customers" ? customerJobs : state.jobs)[0]?.id ?? null);
         renderHistory();
         await refresh();
       } catch (error) {
@@ -797,7 +848,7 @@ function updateLoudness(entry) {
   control.hidden = !entry?.export;
   if (!entry) return;
   if (document.activeElement !== select) select.value = entry.loudness_target === null ? "" : String(entry.loudness_target);
-  select.disabled = entry.status !== "ready";
+  select.disabled = entry.status !== "ready" || Boolean(entry.read_only);
   const measured = entry.export_loudness;
   const rate = `${(entry.master_rate || 24000) / 1000} kHz master`;
   const format = (value) => Number(value).toFixed(1).replace("-", "−");
@@ -851,7 +902,7 @@ function pauseEditor(entry, section, key) {
   input.step = "1";
   input.required = true;
   input.value = pauseDrafts.get(key) ?? section.pause_ms;
-  input.readOnly = entry.status !== "ready";
+  input.readOnly = entry.status !== "ready" || Boolean(entry.read_only);
   const save = element("button", "button button-quiet", "Update pause");
   save.type = "submit";
   const update = () => {
@@ -1023,7 +1074,7 @@ function sectionEditor(entry, section, state) {
   field.rows = 3;
   field.maxLength = chunkLimit;
   field.value = sectionDrafts.get(key) ?? section.text;
-  field.readOnly = entry.status !== "ready";
+  field.readOnly = entry.status !== "ready" || Boolean(entry.read_only);
   const redo = element("button", "button button-primary", "Regenerate section");
   redo.type = "button";
   const sounds = cuePicker(field, "result-error");
@@ -1076,7 +1127,7 @@ function sectionEditor(entry, section, state) {
   more.addEventListener("toggle", () => { if (more.open) openMore.add(key); else openMore.delete(key); });
   more.append(element("summary", "", "More options"));
   const details = section.generation || {};
-  if (section.audio) {
+  if (section.audio && isAdmin) {
     const source = details.engine
       ? [details.engine, details.device?.toUpperCase(), details.runtime].filter(Boolean).join(" · ")
       : "Engine details unavailable";
@@ -1129,7 +1180,7 @@ function takeChooser(entry, section, key) {
     if (!selectedTake) {
       const restore = element("button", "button button-quiet", "Use this take");
       restore.type = "button";
-      restore.disabled = !take.can_restore || !["ready", "failed"].includes(entry.status);
+      restore.disabled = !take.can_restore || !["ready", "failed"].includes(entry.status) || Boolean(entry.read_only);
       if (!take.can_restore) restore.title = "The words for this older take are unknown.";
       restore.addEventListener("click", async () => {
         restore.disabled = true;
@@ -1162,15 +1213,21 @@ function takeChooser(entry, section, key) {
 function renderJob(entry) {
   const status = byId("result-status");
   const message = byId("result-message");
+  const readOnly = Boolean(entry?.read_only);
   status.hidden = !entry;
-  byId("retry").hidden = entry?.status !== "failed";
+  byId("owner-banner").hidden = !entry?.owner;
+  if (entry?.owner) {
+    byId("owner-name").textContent = entry.owner.name ? `${entry.owner.name} · ${entry.owner.email}` : entry.owner.email;
+    byId("owner-disabled").hidden = !entry.owner.disabled;
+  }
+  byId("retry").hidden = entry?.status !== "failed" || readOnly;
   byId("retry").disabled = false;
-  byId("balance").hidden = entry?.status !== "ready" || !entry?.export;
+  byId("balance").hidden = entry?.status !== "ready" || !entry?.export || readOnly;
   byId("balance").disabled = false;
-  byId("check-recording").hidden = !(entry?.checks_available && entry?.status === "ready");
-  byId("reuse-script").hidden = !entry;
+  byId("check-recording").hidden = !(entry?.checks_available && entry?.status === "ready") || readOnly;
+  byId("reuse-script").hidden = !entry || readOnly;
   byId("check-recording").disabled = false;
-  const deliverable = entry?.status === "ready" && Boolean(entry?.export);
+  const deliverable = isAdmin && !readOnly && entry?.status === "ready" && Boolean(entry?.export);
   byId("approval").hidden = !deliverable;
   byId("approve").hidden = !deliverable || entry.approved;
   byId("approve").disabled = false;
@@ -1252,6 +1309,7 @@ async function refresh() {
     byId("nav-queue").textContent = pending ? `${pending} in progress` : "";
     byId("nav-queue").hidden = !pending;
     updateEditor();
+    await loadCustomerJobs();
     if (initialLoad && !selected) await selectJob(state.jobs[0]?.id ?? null);
     else await refreshJob();
     initialLoad = false;
@@ -1266,7 +1324,7 @@ async function refresh() {
 const scriptSounds = cuePicker(script, "script-error");
 const scriptDirections = instructionsEditor("recording-instructions", "");
 // The owner's blind comparisons (2026-11-20) preferred the trained voice with the reference clip.
-const scriptEngine = voiceMatchEditor("recording-engine", trainedVoice ? "trained_reference" : "standard");
+const scriptEngine = voiceMatchEditor("recording-engine", !isAdmin ? houseMatch : trainedVoice ? "trained_reference" : "standard");
 const scriptAdvanced = advancedEditor("script-advanced-setting", turboDefaults, updateEditor);
 byId("script-cue").append(scriptSounds);
 byId("script-engine").append(scriptEngine.box);
@@ -1830,6 +1888,125 @@ byId("compare-start").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+
+// ---- Accounts ----
+byId("sign-out")?.addEventListener("click", async () => {
+  try { await change("/api/auth/logout"); } finally { window.location.replace("/login"); }
+});
+
+// ---- Customers (admin): accounts and misuse review ----
+let reviewUser = null;
+
+byId("owner-account").addEventListener("click", () => {
+  if (!job?.owner) return;
+  reviewUser = { id: job.owner.id, email: job.owner.email };
+  showView("customers");
+});
+
+function shortDate(value) {
+  return value ? new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "—";
+}
+
+async function loadCustomers() {
+  try {
+    const query = reviewUser ? `?user=${reviewUser.id}` : "";
+    const [accounts, review] = await Promise.all([
+      request("/api/admin/accounts"),
+      reviewUser ? request(`/api/admin/accounts/${reviewUser.id}/usage`) : request(`/api/admin/recordings${query}`),
+    ]);
+    errorAt("customers-error");
+    renderAccounts(accounts.accounts);
+    renderReview(reviewUser ? review.usage : review.recordings);
+  } catch (error) {
+    errorAt("customers-error", error.message);
+  }
+}
+
+function renderAccounts(accounts) {
+  const customers = accounts.filter((account) => account.role === "customer");
+  byId("accounts-summary").textContent = `${customers.length} ${customers.length === 1 ? "customer" : "customers"} · ${accounts.length - customers.length} admin`;
+  const rows = accounts.map((account) => {
+    const row = element("tr", account.disabled ? "disabled-row" : "");
+    const who = element("td");
+    who.append(element("strong", "", account.name || account.email));
+    if (account.name) who.append(element("div", "muted", account.email));
+    if (account.role === "admin") who.append(element("span", "admin-tag", "admin"));
+    if (account.disabled) who.append(element("div", "error", "Disabled"));
+    row.append(who, element("td", "", shortDate(account.created_at)), element("td", "", shortDate(account.last_login_at)),
+      element("td", "", String(account.recordings)), element("td", "", String(account.generations)));
+    const actions = element("td");
+    const box = element("div", "form-footer compact");
+    if (account.role === "customer") {
+      const view = element("button", "button button-quiet", "Review scripts");
+      view.type = "button";
+      view.addEventListener("click", () => { reviewUser = account; loadCustomers(); });
+      box.append(view);
+    }
+    const toggle = element("button", "button button-quiet", account.disabled ? "Enable" : "Disable");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => updateAccount(account, { disabled: !account.disabled },
+      account.disabled ? null : `Disable ${account.email}? They are signed out and their queued recordings stop.`));
+    const role = element("button", "button button-quiet", account.role === "admin" ? "Make customer" : "Make admin");
+    role.type = "button";
+    role.addEventListener("click", () => updateAccount(account, { role: account.role === "admin" ? "customer" : "admin" },
+      account.role === "admin" ? null : `Give ${account.email} full admin access, including voices and all customer files?`));
+    box.append(toggle, role);
+    actions.append(box);
+    row.append(actions);
+    return row;
+  });
+  byId("accounts-table").querySelector("tbody").replaceChildren(...rows);
+}
+
+async function updateAccount(account, value, question) {
+  if (question && !window.confirm(question)) return;
+  try {
+    await change(`/api/admin/accounts/${account.id}`, { method: "PUT", value });
+    await loadCustomers();
+  } catch (error) {
+    errorAt("customers-error", error.message);
+  }
+}
+
+function renderReview(items) {
+  const filter = byId("review-filter");
+  filter.replaceChildren();
+  if (reviewUser) {
+    filter.append(`Showing ${reviewUser.email} · `);
+    const all = element("button", "link-button", "Show all customers");
+    all.type = "button";
+    all.addEventListener("click", () => { reviewUser = null; loadCustomers(); });
+    filter.append(all);
+  }
+  const list = byId("review-list");
+  if (!items.length) {
+    list.replaceChildren(element("li", "muted", "No customer scripts yet."));
+    return;
+  }
+  list.replaceChildren(...items.map((item) => {
+    const row = element("li", "compare-item");
+    const heading = element("div", "form-footer compact");
+    const label = reviewUser
+      ? `${item.kind === "create" ? "New recording" : "Section edit"} · ${shortDate(item.created_at)}`
+      : `${item.title} · ${item.email} · ${shortDate(item.created_at)}`;
+    heading.append(element("strong", "", label));
+    const jobId = item.job_id || item.id;
+    if (!reviewUser || item.still_exists) {
+      const open = element("button", "button button-quiet", "Open recording");
+      open.type = "button";
+      open.addEventListener("click", async () => {
+        await setHistoryScope("customers");
+        showView("recordings");
+        await selectJob(jobId);
+      });
+      heading.append(open);
+    } else {
+      heading.append(element("span", "muted", "Recording deleted by the customer"));
+    }
+    row.append(heading, element("p", "review-script", item.text ?? item.script));
+    return row;
+  }));
+}
 
 // First visit: a short welcome that points to the guide. Browser storage may be unavailable.
 try {

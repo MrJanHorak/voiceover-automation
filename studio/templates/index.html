@@ -14,18 +14,29 @@
 <body data-script-limit="{{ script_limit }}" data-chunk-limit="{{ chunk_limit }}" data-max-pause="{{ max_pause }}"
       data-directed-available="{{ 'true' if directed_available else 'false' }}"
       data-checks-available="{{ 'true' if checks_available else 'false' }}"
-      data-trained-voice="{{ trained_voice.name if trained_voice and directed_available else '' }}">
+      data-trained-voice="{{ trained_voice.name if trained_voice and directed_available else '' }}"
+      data-admin="{{ 'true' if admin else 'false' }}" data-house-match="{{ house_match }}"
+      data-auth="{{ 'true' if auth_enabled else 'false' }}">
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand"><span class="wave-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span> Voice-over Studio</span>
       <nav class="main-nav" aria-label="Studio">
         <button type="button" class="nav-link" data-view="create">New recording</button>
         <button type="button" class="nav-link" data-view="recordings">Recordings <span id="nav-queue" class="nav-count" hidden></span></button>
+        {% if admin %}
         <button type="button" class="nav-link" data-view="voice">Voice and words</button>
         <button type="button" class="nav-link" data-view="training">Voice training</button>
+        {% if auth_enabled %}<button type="button" class="nav-link" data-view="customers">Customers</button>{% endif %}
+        {% endif %}
         <button type="button" class="nav-link" data-view="guide">Guide</button>
       </nav>
-      <span class="local-status"><span></span> Local · Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
+      {% if admin %}<span class="local-status"><span></span> Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>{% endif %}
+      {% if auth_enabled %}
+      <span class="account-menu">
+        <span title="{{ account.email }}">{{ account.name or account.email }}{% if admin %} <span class="admin-tag">admin</span>{% endif %}</span>
+        <button type="button" class="link-button" id="sign-out">Sign out</button>
+      </span>
+      {% endif %}
     </div>
   </header>
 
@@ -35,7 +46,7 @@
       <div id="welcome" class="welcome" hidden>
         <div>
           <strong>Welcome to your voice-over studio</strong>
-          <p>Three steps: write or import your script and check how it will be spoken, choose how it should sound, then review each section and download the recording. Everything runs on this computer.</p>
+          <p>Three steps: write or import your script and check how it will be spoken, choose how it should sound, then review each section and download the recording.{% if admin and not auth_enabled %} Everything runs on this computer.{% endif %}</p>
         </div>
         <div class="welcome-actions">
           <button type="button" class="button button-quiet" data-view="guide">Read the guide</button>
@@ -97,6 +108,7 @@
 
         <section class="panel step-panel" id="step-2" aria-labelledby="settings-heading" hidden>
           <div class="panel-heading"><h2 id="settings-heading">Settings</h2></div>
+          {% if admin %}
           <div class="summary-row">
             <span class="muted">Voice reference</span>
             <strong id="settings-voice">Checking…</strong>
@@ -104,9 +116,17 @@
             {{ tip("The recording of your voice that the model copies. Add or switch references, and save the transcript needed for maximum resemblance, under Voice and words.") }}
           </div>
           <div id="script-engine"></div>
+          {% else %}
+          <div class="summary-row">
+            <span class="muted">Voice</span>
+            <strong id="settings-voice">Checking…</strong>
+            {{ tip("The studio's voice. Your recordings use it with the studio's best settings.") }}
+          </div>
+          <div id="script-engine" hidden></div>
+          {% endif %}
           <div class="instructions-control">
             <div class="label-row">
-              <span class="field-label">Delivery style {{ tip("Optional directions for how to read, such as calm, energetic or whispered. Use one style for the whole script, or give individual paragraphs their own style. Styles use VoxCPM2's directed mode, which does not use the reference transcript.") }}</span>
+              <span class="field-label">Delivery style {% if admin %}{{ tip("Optional directions for how to read, such as calm, energetic or whispered. Use one style for the whole script, or give individual paragraphs their own style. Styles use VoxCPM2's directed mode, which does not use the reference transcript.") }}{% else %}{{ tip("Optional directions for how to read, such as calm, energetic or whispered. Use one style for the whole script, or give individual paragraphs their own style.") }}{% endif %}</span>
               <div class="segmented" role="group" aria-label="Delivery style">
                 <button type="button" id="style-whole" aria-pressed="true">Whole script</button>
                 <button type="button" id="style-paragraphs" aria-pressed="false">Per paragraph</button>
@@ -115,7 +135,7 @@
             <div id="script-instructions"></div>
             <ol id="paragraph-styles" class="paragraph-styles" hidden aria-label="Delivery style per paragraph"></ol>
           </div>
-          <div class="instructions-control">
+          <div class="instructions-control"{% if not admin %} hidden{% endif %}>
             <div class="label-row">
               <label for="auto-retries">If a section fails its automatic check</label>
               {{ tip("After each section is generated, the studio transcribes it on this computer, compares it with your script, and checks the voice and pace. A failed section can be generated again automatically; every take is kept so you can still choose.") }}
@@ -127,7 +147,7 @@
             </select>
             {% if not checks_available %}<p class="muted instructions-hint">Automatic checks are not set up. Download the speech-recognition model described in the README, then restart the studio.</p>{% endif %}
           </div>
-          <div id="script-advanced"></div>
+          <div id="script-advanced"{% if not admin %} hidden{% endif %}></div>
           <div class="form-footer step-footer">
             <button class="button button-quiet" type="button" id="back-to-step-1">Back to script</button>
             <span class="muted" id="queue-note"></span>
@@ -144,6 +164,12 @@
       <div class="view-heading"><h1 id="recordings-heading">Recordings</h1></div>
       <div class="recordings-grid">
         <aside class="panel history-panel" aria-label="Saved recordings">
+          {% if admin and auth_enabled %}
+          <div class="segmented history-scope" role="group" aria-label="Whose recordings">
+            <button type="button" id="scope-mine" aria-pressed="true">My recordings</button>
+            <button type="button" id="scope-customers" aria-pressed="false">Customers</button>
+          </div>
+          {% endif %}
           <p id="history-empty" class="muted">Your recordings will appear here.</p>
           <ul id="history" class="history" aria-label="Saved recordings"></ul>
         </aside>
@@ -152,6 +178,14 @@
             <div class="panel-heading">
               <h2 id="result-heading">Recording</h2>
               <span id="result-status" class="status" hidden></span>
+            </div>
+            <div id="owner-banner" class="owner-banner" role="note" hidden>
+              <div>
+                <strong>Customer recording</strong> · <span id="owner-name"></span>
+                <span id="owner-disabled" class="error" hidden> · account disabled</span>
+                <p class="muted">Read-only review: you can listen, download or delete it. Only the customer can edit it.</p>
+              </div>
+              <button type="button" class="button button-quiet" id="owner-account">View account</button>
             </div>
             <div id="result-message" class="result-message" role="status" aria-live="polite">Generate a voice-over to play and download it here.</div>
             <p id="result-error" class="error" role="alert" hidden></p>
@@ -382,9 +416,31 @@
     </section>
 
     <!-- Guide: how the studio works, for first-time use. -->
+    <section id="view-customers" class="view" aria-labelledby="customers-heading" hidden>
+      <div class="view-heading">
+        <h1 id="customers-heading">Customers {{ tip("Everyone with an account, and every script customers have submitted. Customers download recordings immediately; review them here. Disabling an account signs it out, stops its queued recordings and blocks new ones.") }}</h1>
+      </div>
+      <p id="customers-error" class="error" role="alert" hidden></p>
+      <section class="panel" aria-labelledby="accounts-heading">
+        <div class="panel-heading"><h2 id="accounts-heading">Accounts</h2><span class="muted" id="accounts-summary"></span></div>
+        <div class="table-scroll"><table class="account-table" id="accounts-table">
+          <thead><tr><th>Account</th><th>Joined</th><th>Last sign-in</th><th>Recordings</th><th>Scripts sent</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </section>
+      <section class="panel" aria-labelledby="review-list-heading">
+        <div class="panel-heading">
+          <h2 id="review-list-heading">Customer scripts {{ tip("Every script and section edit customers submitted, newest first, including recordings they have since deleted. Open a recording to listen to it.") }}</h2>
+          <span class="muted" id="review-filter"></span>
+        </div>
+        <ol class="compare-list" id="review-list"></ol>
+      </section>
+    </section>
+
     <section id="view-guide" class="view guide" aria-labelledby="guide-heading" hidden>
       <div class="view-heading"><h1 id="guide-heading">How the studio works</h1></div>
-      <p class="guide-lead">Turn a script into a recording in your own voice, in three steps. Set up your voice once under Voice and words; after that, most recordings take a few minutes of your attention.</p>
+      {% if admin %}<p class="guide-lead">Turn a script into a recording in your own voice, in three steps. Set up your voice once under Voice and words; after that, most recordings take a few minutes of your attention.</p>
+      {% else %}<p class="guide-lead">Turn a script into a finished voice-over in three steps. Most recordings take a few minutes of your attention.</p>{% endif %}
 
       <ol class="guide-steps">
         <li class="panel">
@@ -396,7 +452,7 @@
         <li class="panel">
           <span class="step-number">2</span>
           <h2>Settings</h2>
-          <p>Choose the <strong>voice engine</strong>: Chatterbox Turbo is fast; Maximum resemblance sounds most like you but takes longer. Once you have trained your voice, <strong>Trained voice</strong> speaks with it, with or without your reference clip.</p>
+          {% if admin %}<p>Choose the <strong>voice engine</strong>: Chatterbox Turbo is fast; Maximum resemblance sounds most like you but takes longer. Once you have trained your voice, <strong>Trained voice</strong> speaks with it, with or without your reference clip.</p>{% endif %}
           <p>Optionally add a <strong>delivery style</strong>, such as "warm, conversational narrator", for the whole script or per paragraph. Then select <strong>Generate voice-over</strong>.</p>
         </li>
         <li class="panel">
@@ -408,6 +464,7 @@
       </ol>
 
       <div class="guide-grid">
+        {% if admin %}
         <section class="panel">
           <h2>Set up your voice once</h2>
           <ul>
@@ -416,6 +473,7 @@
             <li>Keep several references, such as conversational and energetic, and switch between them.</li>
           </ul>
         </section>
+        {% endif %}
         <section class="panel">
           <h2>Pronunciations</h2>
           <ul>
@@ -432,6 +490,7 @@
             <li><strong>More options</strong> holds the pause after a section and advanced settings.</li>
           </ul>
         </section>
+        {% if admin %}
         <section class="panel">
           <h2>Training your voice</h2>
           <ul>
@@ -441,6 +500,8 @@
             <li>Once trained, <strong>Compare your trained voice</strong> lets you judge it blind against the other engines.</li>
           </ul>
         </section>
+        {% endif %}
+        {% if admin %}
         <section class="panel">
           <h2>Hands-off recordings</h2>
           <ul>
@@ -449,6 +510,7 @@
             <li>The recording appears under <strong>Recordings</strong> marked <strong>Approve</strong>. Listen, fix any section, then select <strong>Approve and send to outbox</strong>: <code>{{ outbox }}</code>.</li>
           </ul>
         </section>
+        {% endif %}
         <section class="panel">
           <h2>Delivering the file</h2>
           <ul>
@@ -520,7 +582,8 @@
       </div>
       <textarea rows="2" maxlength="{{ instructions_limit }}" placeholder="Describe how to read the script…"></textarea>
       <p class="muted instructions-hint">
-        {% if directed_available %}Describe the voice and delivery, for example "energetic, upbeat commercial announcer" or "calm, slow, reassuring". Descriptions tend to work better than commands such as "Read like…". Instructions use VoxCPM2's directed mode, which does not use the reference transcript. Results vary, so listen to each take. Put spoken words in the script.
+        {% if not admin %}Describe the delivery, for example "energetic, upbeat commercial announcer" or "calm, slow, reassuring". Descriptions tend to work better than commands such as "Read like…". Results vary, so listen to each take. Put the words to be spoken in the script, not here.
+        {% elif directed_available %}Describe the voice and delivery, for example "energetic, upbeat commercial announcer" or "calm, slow, reassuring". Descriptions tend to work better than commands such as "Read like…". Instructions use VoxCPM2's directed mode, which does not use the reference transcript. Results vary, so listen to each take. Put spoken words in the script.
         {% else %}Set up local VoxCPM2 to generate a recording with directions. See the README.{% endif %}
       </p>
     </div>

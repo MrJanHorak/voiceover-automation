@@ -11,6 +11,7 @@
 
 - The sole production voice is the owner's. Keep reference enrollment owner-only. Use synthetic or explicitly authorized fixtures for testing. Preserve any watermark applied by the model.
 - Keep voice samples, derived voice data (including trained adapters under `data/studio/trained/` and training result zips), scripts, recordings, model files, databases, and secrets outside version control. Use ignored local directories or an explicitly configured private data directory. Avoid logging script text and audio content.
+- Every route needs an explicit access rule in `studio/app.py`: `admin_only`/`admin_mutations` for voice, training, intake and account features; `job_access`/`job_mutations` for anything under `/api/jobs/{job_id}`, where customers reach only their own recordings and get 404 otherwise; and `mutations` (signed in) for the rest. Customers must never see engine names, model details or other accounts' data (`customer_view`). Tests that are not about accounts pass `auth=False` to `create_app`.
 - Bind the Phase 1 app to loopback by default. Validate file content and bounds, use generated IDs for stored paths, and keep private media outside static assets. Serve downloads through app routes with the applicable access checks.
 
 ## Verification
