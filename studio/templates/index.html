@@ -24,18 +24,21 @@
         <button type="button" class="nav-link" data-view="create">New recording</button>
         <button type="button" class="nav-link" data-view="recordings">Recordings <span id="nav-queue" class="nav-count" hidden></span></button>
         {% if admin %}
-        <button type="button" class="nav-link" data-view="voice">Voice and words</button>
-        <button type="button" class="nav-link" data-view="training">Voice training</button>
+        {% if auth_enabled %}<button type="button" class="nav-link" data-view="voices">Voices</button>{% endif %}
+        <button type="button" class="nav-link" data-view="voice" title="Voice references and pronunciations">References</button>
+        <button type="button" class="nav-link" data-view="training" title="Voice training">Training</button>
         {% if auth_enabled %}<button type="button" class="nav-link" data-view="customers">Customers</button>{% endif %}
         {% endif %}
         <button type="button" class="nav-link" data-view="guide">Guide</button>
       </nav>
-      {% if admin %}<span class="local-status"><span></span> Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>{% endif %}
       {% if auth_enabled %}
       <span class="account-menu">
-        <span title="{{ account.email }}">{{ account.name or account.email }}{% if admin %} <span class="admin-tag">admin</span>{% endif %}</span>
+        <span class="account-name" title="{{ account.email }}">{{ account.name or account.email }}</span>
+        {% if admin %}<span class="admin-tag">admin</span>{% endif %}
         <button type="button" class="link-button" id="sign-out">Sign out</button>
       </span>
+      {% else %}
+      <span class="local-status"><span></span> Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
       {% endif %}
     </div>
   </header>
@@ -117,10 +120,12 @@
           </div>
           <div id="script-engine"></div>
           {% else %}
-          <div class="summary-row">
-            <span class="muted">Voice</span>
-            <strong id="settings-voice">Checking…</strong>
-            {{ tip("The studio's voice. Your recordings use it with the studio's best settings.") }}
+          <div class="instructions-control">
+            <div class="label-row">
+              <span class="field-label">Voice {{ tip("Choose who reads your script. Play a sample to hear each voice. Every recording is watermarked as AI-generated.") }}</span>
+              <strong id="settings-voice" class="muted"></strong>
+            </div>
+            <div id="voice-picker" class="voice-picker" role="radiogroup" aria-label="Voice"></div>
           </div>
           <div id="script-engine" hidden></div>
           {% endif %}
@@ -416,6 +421,72 @@
     </section>
 
     <!-- Guide: how the studio works, for first-time use. -->
+    <section id="view-voices" class="view" aria-labelledby="voices-heading" hidden>
+      <div class="view-heading">
+        <h1 id="voices-heading">Voices {{ tip("The voices customers can choose. Each one combines a reference recording, an optional trained voice and the speaker's consent. Only published voices with consent on record are offered, and revoking consent removes a voice for good.") }}</h1>
+        <span class="local-status"><span></span> Chatterbox {{ device|upper }} · VoxCPM2 {{ directed_device|upper }}</span>
+      </div>
+      <p id="voices-error" class="error" role="alert" hidden></p>
+      <div class="voices-grid">
+        <section class="panel" aria-labelledby="catalog-heading">
+          <div class="panel-heading">
+            <h2 id="catalog-heading">Voice catalog</h2>
+            <button type="button" class="button button-quiet" id="voice-new">New voice</button>
+          </div>
+          <ol id="voice-list" class="voice-list"></ol>
+        </section>
+        <section class="panel" aria-labelledby="voice-form-heading" id="voice-form-panel" hidden>
+          <div class="panel-heading"><h2 id="voice-form-heading">New voice</h2></div>
+          <form id="voice-form" novalidate>
+            <label for="profile-name">Name customers see</label>
+            <input type="text" id="profile-name" maxlength="60" required placeholder="For example: Jan · warm narrator">
+            <label for="profile-description">Description</label>
+            <textarea id="profile-description" rows="2" maxlength="300" placeholder="Warm, friendly and clear. Great for explainers and adverts."></textarea>
+            <label for="profile-reference">Reference recording {{ tip("A clean recording of the speaker, added under References. With a saved transcript it also enables maximum resemblance.") }}</label>
+            <select id="profile-reference"></select>
+            <label for="profile-trained">Trained voice {{ tip("A voice trained on this speaker with the training kit. Upload it below. Without one, the voice uses maximum resemblance or Chatterbox.") }}</label>
+            <select id="profile-trained"></select>
+            <fieldset class="consent-fieldset">
+              <legend>Speaker's consent</legend>
+              <label class="toggle"><input type="radio" name="consent" value="self"> This is my own voice</label>
+              <label class="toggle"><input type="radio" name="consent" value="written"> Another person has given written consent</label>
+              <div id="written-consent" hidden>
+                <label for="profile-speaker">Speaker's full name</label>
+                <input type="text" id="profile-speaker" maxlength="100">
+                <label for="profile-consent-date">Date signed</label>
+                <input type="date" id="profile-consent-date">
+                <label for="profile-consent-file">Signed consent (PDF, PNG or JPEG)</label>
+                <input type="file" id="profile-consent-file" accept=".pdf,.png,.jpg,.jpeg">
+                <p class="muted instructions-hint" id="consent-file-state"></p>
+              </div>
+              <label for="profile-notes">Notes <span class="muted">(optional, admins only)</span></label>
+              <textarea id="profile-notes" rows="2" maxlength="1000" placeholder="What the speaker agreed to, for example commercial voice-overs, and any limits."></textarea>
+            </fieldset>
+            <p id="voice-form-error" class="error" role="alert" hidden></p>
+            <div class="form-footer">
+              <button type="submit" class="button button-primary" id="voice-save">Save voice</button>
+              <button type="button" class="button button-quiet" id="voice-cancel">Cancel</button>
+            </div>
+          </form>
+        </section>
+        <section class="panel" aria-labelledby="trained-heading">
+          <div class="panel-heading"><h2 id="trained-heading">Trained voices {{ tip("Upload the two files from one checkpoint folder of the training results, for example lora/step_0000150: lora_config.json and lora_weights.safetensors.") }}</h2></div>
+          <ul id="trained-list" class="tips-list muted"></ul>
+          <form id="trained-form" novalidate>
+            <label for="trained-name">Name</label>
+            <input type="text" id="trained-name" maxlength="64" placeholder="For example: jan-step150">
+            <label for="trained-config">lora_config.json</label>
+            <input type="file" id="trained-config" accept=".json">
+            <label for="trained-weights">lora_weights.safetensors</label>
+            <input type="file" id="trained-weights" accept=".safetensors">
+            <p id="trained-error" class="error" role="alert" hidden></p>
+            <div class="form-footer"><button type="submit" class="button button-quiet" id="trained-upload">Upload trained voice</button>
+              <span class="muted" id="trained-status" role="status"></span></div>
+          </form>
+        </section>
+      </div>
+    </section>
+
     <section id="view-customers" class="view" aria-labelledby="customers-heading" hidden>
       <div class="view-heading">
         <h1 id="customers-heading">Customers {{ tip("Everyone with an account, and every script customers have submitted. Customers download recordings immediately; review them here. Disabling an account signs it out, stops its queued recordings and blocks new ones.") }}</h1>
@@ -431,7 +502,7 @@
       <section class="panel" aria-labelledby="review-list-heading">
         <div class="panel-heading">
           <h2 id="review-list-heading">Customer scripts {{ tip("Every script and section edit customers submitted, newest first, including recordings they have since deleted. Open a recording to listen to it.") }}</h2>
-          <span class="muted" id="review-filter"></span>
+          <span class="muted" id="review-scope"></span>
         </div>
         <ol class="compare-list" id="review-list"></ol>
       </section>
@@ -571,7 +642,7 @@
   <template id="delivery-instructions">
     <div class="instructions-control">
       <div class="instructions-heading">
-        <label for="">Delivery style <span class="muted">· Optional</span></label>
+        <label for="" class="instructions-label">Delivery style <span class="muted">· Optional</span></label>
         <select aria-label="Choose a delivery example">
           <option value="">Choose an example</option>
           <option value="hushed whisper, slow, with deliberate pauses">Hushed whisper</option>

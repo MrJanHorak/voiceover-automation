@@ -8,6 +8,8 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from .trained import find_trained
+
 
 SCRIPT_LIMIT = 12000
 CHUNK_LIMIT = 220
@@ -269,6 +271,27 @@ class Store:
                 );
                 -- Every script submitted for generation, kept when a recording is deleted, so the admin can
                 -- review misuse; later also the basis for usage billing.
+                -- Voices customers can choose: a reference recording, an optional trained voice, and the
+                -- speaker's consent. Only published profiles with consent on record are offered.
+                CREATE TABLE IF NOT EXISTS voice_profiles (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    voice_id TEXT NOT NULL REFERENCES voices(id),
+                    trained_voice TEXT,
+                    published INTEGER NOT NULL DEFAULT 0,
+                    position INTEGER NOT NULL DEFAULT 0,
+                    speaker TEXT NOT NULL DEFAULT '',
+                    consent_type TEXT CHECK (consent_type IN ('self', 'written')),
+                    consent_date TEXT,
+                    consent_file TEXT,
+                    consent_notes TEXT NOT NULL DEFAULT '',
+                    consent_recorded_at TEXT,
+                    consent_revoked_at TEXT,
+                    sample_job_id TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS usage_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT,
@@ -358,6 +381,9 @@ class Store:
             if "user_id" not in job_columns:
                 # NULL: made by the studio owner (local mode, inbox or before accounts existed).
                 db.execute("ALTER TABLE jobs ADD COLUMN user_id TEXT")
+            if "voice_profile_id" not in job_columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN voice_profile_id TEXT")
+            self.seed_profile(db)
             # Older databases know only the current audio. Pending edits may no longer match it.
             db.execute("""
                 INSERT OR IGNORE INTO section_takes
@@ -572,7 +598,8 @@ class Store:
 
     def create_job(self, title, script, instructions="", prepared_sections=None, turbo_settings=None,
                    voice_match="standard", directed_available=False, auto_retries=0, trained_voice=None,
-                   blind=False, source="studio", user_id=None, voice_label=None):
+                   blind=False, source="studio", user_id=None, voice_label=None, voice_id=None,
+                   voice_profile_id=None):
         if auto_retries not in (0, 1, 2):
             raise StudioError("Choose 0, 1 or 2 automatic retries.")
         sections = prepared_sections if prepared_sections is not None else [
@@ -584,7 +611,11 @@ class Store:
         job_id = new_id()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            voice = self.active_voice(db)
+            if voice_id:
+                row = db.execute("SELECT * FROM voices WHERE id = ?", (voice_id,)).fetchone()
+                voice = dict(row) if row else None
+            else:
+                voice = self.active_voice(db)
             if voice is None:
                 raise StudioError("Add a voice reference before generating a recording.", 409)
             for section in sections:
@@ -595,11 +626,12 @@ class Store:
             uses_trained = any(section["voice_match"] in TRAINED_MATCHES for section in sections)
             db.execute("""
                 INSERT INTO jobs (id, title, script, voice_id, engine, created_at, instructions, trim_edges,
-                                  master_rate, loudness_target, auto_retries, trained_voice, blind, source, user_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                                  master_rate, loudness_target, auto_retries, trained_voice, blind, source, user_id,
+                                  voice_profile_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (job_id, title, script, voice["id"], DIRECTED_VERSION if uses_voxcpm else ENGINE_VERSION,
                   now(), instructions, MASTER_RATE, DEFAULT_LOUDNESS, auto_retries,
-                  trained_voice if uses_trained else None, int(blind), source, user_id))
+                  trained_voice if uses_trained else None, int(blind), source, user_id, voice_profile_id))
             db.execute("INSERT INTO usage_log (user_id, job_id, kind, text, voice, created_at) VALUES (?, ?, 'create', ?, ?, ?)",
                        (user_id, job_id, script, voice_label or voice["label"], now()))
             settings_json = json.dumps(turbo_settings, sort_keys=True) if turbo_settings is not None else None
@@ -668,6 +700,146 @@ class Store:
             if job["blind_choice"]:
                 raise StudioError("This comparison already has a choice.", 409)
             db.execute("UPDATE jobs SET blind_choice = ? WHERE id = ?", (choice, job_id))
+
+    # ---- Voice catalog ----
+
+    PROFILE_FIELDS = ("name", "description", "voice_id", "trained_voice", "speaker", "consent_type", "consent_date",
+                      "consent_notes")
+
+    def seed_profile(self, db):
+        """Once: turn the studio's existing voice into the first catalog voice, so customers keep a voice.
+
+        It is the studio owner's own voice, which customers already used before the catalog existed.
+        """
+        if db.execute("SELECT 1 FROM meta WHERE key = 'profiles_seeded'").fetchone():
+            return
+        db.execute("INSERT INTO meta (key, value) VALUES ('profiles_seeded', ?)", (now(),))
+        voice = self.active_voice(db)
+        if voice is None or db.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0]:
+            return
+        trained = find_trained(self.root / "trained")
+        db.execute("""
+            INSERT INTO voice_profiles (id, name, description, voice_id, trained_voice, published, speaker,
+                                        consent_type, consent_recorded_at, consent_notes, created_at)
+            VALUES (?, 'Studio voice', 'The studio owner''s voice.', ?, ?, 1, 'Studio owner', 'self', ?, ?, ?)
+        """, (new_id(), voice["id"], trained["name"] if trained else None, now(),
+              "Created automatically from the studio's active voice when the voice catalog was added. Review it.", now()))
+
+    def profiles(self, published_only=False):
+        with self.connect() as db:
+            where = "WHERE p.published = 1 AND p.consent_revoked_at IS NULL" if published_only else ""
+            rows = db.execute(f"""
+                SELECT p.*, v.label AS voice_label, v.transcript AS voice_transcript,
+                       j.status AS sample_status, j.export AS sample_export,
+                       (SELECT COUNT(*) FROM jobs WHERE jobs.voice_profile_id = p.id AND jobs.blind = 0) AS recordings
+                FROM voice_profiles p
+                LEFT JOIN voices v ON v.id = p.voice_id
+                LEFT JOIN jobs j ON j.id = p.sample_job_id
+                {where} ORDER BY p.position, p.rowid
+            """).fetchall()
+            return [dict(row) for row in rows]
+
+    def profile(self, profile_id):
+        return next((item for item in self.profiles() if item["id"] == profile_id), None)
+
+    @staticmethod
+    def consent_problem(profile):
+        """Why a profile cannot be offered to customers, or None."""
+        if profile.get("consent_revoked_at"):
+            return "The speaker's consent was revoked."
+        if profile.get("consent_type") == "self":
+            return None
+        if profile.get("consent_type") == "written":
+            if not profile.get("consent_file"):
+                return "Attach the speaker's signed consent before publishing."
+            if not (profile.get("speaker") or "").strip():
+                return "Enter the speaker's name before publishing."
+            return None
+        return "Record the speaker's consent before publishing."
+
+    def save_profile(self, values, profile_id=None):
+        values = {key: values.get(key) for key in self.PROFILE_FIELDS if key in values}
+        if "name" in values:
+            values["name"] = " ".join((values["name"] or "").split())
+            if not values["name"]:
+                raise StudioError("Give the voice a name.")
+        if values.get("consent_type") not in (None, "self", "written"):
+            raise StudioError("Choose how consent was given.")
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if "voice_id" in values and not db.execute("SELECT 1 FROM voices WHERE id = ?", (values["voice_id"],)).fetchone():
+                raise StudioError("Choose a saved voice reference.", 404)
+            if profile_id is None:
+                if not values.get("name") or not values.get("voice_id"):
+                    raise StudioError("A voice needs a name and a reference recording.")
+                profile_id = new_id()
+                position = db.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM voice_profiles").fetchone()[0]
+                db.execute("INSERT INTO voice_profiles (id, name, voice_id, position, created_at) VALUES (?, ?, ?, ?, ?)",
+                           (profile_id, values["name"], values["voice_id"], position, now()))
+            existing = db.execute("SELECT * FROM voice_profiles WHERE id = ?", (profile_id,)).fetchone()
+            if existing is None:
+                raise StudioError("Voice not found.", 404)
+            if existing["consent_revoked_at"] and any(key.startswith("consent") for key in values):
+                raise StudioError("Consent for this voice was revoked. Create a new voice with new consent.", 409)
+            if values:
+                consent_changed = any(values.get(key) != existing[key] for key in ("consent_type", "speaker") if key in values)
+                assignments = ", ".join(f"{key} = ?" for key in values)
+                db.execute(f"UPDATE voice_profiles SET {assignments} WHERE id = ?", (*values.values(), profile_id))
+                if consent_changed:
+                    db.execute("UPDATE voice_profiles SET consent_recorded_at = ? WHERE id = ?", (now(), profile_id))
+                updated = dict(db.execute("SELECT * FROM voice_profiles WHERE id = ?", (profile_id,)).fetchone())
+                if updated["published"] and self.consent_problem(updated):
+                    raise StudioError(self.consent_problem(updated), 409)
+        return self.profile(profile_id)
+
+    def set_consent_file(self, profile_id, filename):
+        with self.connect() as db:
+            row = db.execute("SELECT consent_file, consent_revoked_at FROM voice_profiles WHERE id = ?", (profile_id,)).fetchone()
+            if row is None:
+                raise StudioError("Voice not found.", 404)
+            if row["consent_revoked_at"]:
+                raise StudioError("Consent for this voice was revoked. Create a new voice with new consent.", 409)
+            db.execute("UPDATE voice_profiles SET consent_file = ?, consent_recorded_at = ? WHERE id = ?",
+                       (filename, now(), profile_id))
+            return row["consent_file"]
+
+    def publish_profile(self, profile_id, published):
+        profile = self.profile(profile_id)
+        if profile is None:
+            raise StudioError("Voice not found.", 404)
+        if published and self.consent_problem(profile):
+            raise StudioError(self.consent_problem(profile), 409)
+        with self.connect() as db:
+            db.execute("UPDATE voice_profiles SET published = ? WHERE id = ?", (int(published), profile_id))
+        return self.profile(profile_id)
+
+    def revoke_consent(self, profile_id):
+        """The speaker withdrew consent: unpublish for good and stop queued recordings with this voice."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("UPDATE voice_profiles SET consent_revoked_at = ?, published = 0 WHERE id = ? "
+                          "AND consent_revoked_at IS NULL", (now(), profile_id)).rowcount == 0:
+                if not db.execute("SELECT 1 FROM voice_profiles WHERE id = ?", (profile_id,)).fetchone():
+                    raise StudioError("Voice not found.", 404)
+            db.execute("UPDATE jobs SET status = 'failed', error = 'This voice is no longer available.' "
+                       "WHERE voice_profile_id = ? AND status = 'queued'", (profile_id,))
+        return self.profile(profile_id)
+
+    def delete_profile(self, profile_id):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT published FROM voice_profiles WHERE id = ?", (profile_id,)).fetchone()
+            if row is None:
+                raise StudioError("Voice not found.", 404)
+            if row["published"]:
+                raise StudioError("Unpublish the voice before deleting it.", 409)
+            if db.execute("SELECT 1 FROM jobs WHERE voice_profile_id = ? AND blind = 0", (profile_id,)).fetchone():
+                raise StudioError("Recordings use this voice. Unpublish it instead, or revoke consent.", 409)
+            db.execute("DELETE FROM voice_profiles WHERE id = ?", (profile_id,))
+
+    def set_sample(self, profile_id, job_id):
+        with self.connect() as db:
+            db.execute("UPDATE voice_profiles SET sample_job_id = ? WHERE id = ?", (job_id, profile_id))
 
     # ---- Accounts ----
 

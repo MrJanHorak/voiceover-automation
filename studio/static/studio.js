@@ -45,7 +45,8 @@ let reviewFilter = "all";
 const sectionSelection = new Map();
 const takeSelection = new Map();
 const openMore = new Set();
-const views = isAdmin ? ["create", "recordings", "voice", "training", ...(authEnabled ? ["customers"] : []), "guide"]
+const views = isAdmin
+  ? ["create", "recordings", ...(authEnabled ? ["voices"] : []), "voice", "training", ...(authEnabled ? ["customers"] : []), "guide"]
   : ["create", "recordings", "guide"];
 
 const turboDefaults = { seed: 35, temperature: 0.8, top_p: 0.95, top_k: 1000,
@@ -102,6 +103,7 @@ function showView(name, { remember = true } = {}) {
     loadComparisons();
   }
   if (currentView === "customers") loadCustomers();
+  if (currentView === "voices") loadVoices();
   window.scrollTo({ top: 0 });
 }
 
@@ -213,7 +215,7 @@ function cuePicker(field, errorId) {
   const picker = byId("delivery-cues").content.firstElementChild.cloneNode(true);
   picker.disabled = field.readOnly;
   // Sound cues work only with Chatterbox; customers never see a control that cannot work for them.
-  picker.hidden = !isAdmin && usesVoxcpm(houseMatch);
+  picker.hidden = !isAdmin;
   picker.addEventListener("change", () => {
     const cue = picker.value;
     picker.value = "";
@@ -255,11 +257,11 @@ function instructionsEditor(id, value, readOnly = false) {
 }
 
 function renderVoice() {
-  const signature = JSON.stringify([state.voice, state.voices, state.reference_notice]);
+  const signature = JSON.stringify([state.voice, state.voices, state.reference_notice, state.catalog]);
   if (signature === voiceSignature) return;
   voiceSignature = signature;
   if (!isAdmin) {
-    byId("settings-voice").textContent = state.voice ? state.voice.label : "Not available yet. Try again later.";
+    renderVoicePicker(state.catalog || []);
     return;
   }
   const voice = state.voice;
@@ -1090,7 +1092,7 @@ function sectionEditor(entry, section, state) {
     const directed = Boolean(directions.field.value.trim());
     const maximum = !directed && engine.field.value === "maximum";
     sounds.disabled = field.readOnly || directed || usesVoxcpm(engine.field.value);
-    redo.disabled = field.readOnly || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
+    redo.disabled = field.readOnly || entry.voice_available === false || !field.value.trim() || (directed && !directedAvailable) || !advanced.valid()
       || (maximum && (!directedAvailable || !entry.voice_transcript_ready))
       || (engine.field.value.startsWith("trained") && !(directedAvailable && (entry.trained_voice || trainedVoice)));
     redo.title = maximum && !entry.voice_transcript_ready ? "Add the transcript for this recording's voice reference first." : "";
@@ -1252,7 +1254,11 @@ function renderJob(entry) {
     };
     const review = entry.sections.filter((section) => !section.pending && section.check && section.check.status !== "pass").length;
     const reviewNote = review ? ` · ${review} ${review === 1 ? "section needs" : "sections need"} review` : "";
-    message.textContent = `${entry.title} · ${phrases[entry.status]}${reviewNote}`;
+    const voiceNote = entry.voice_name ? ` · ${entry.voice_name}` : "";
+    message.textContent = `${entry.title}${voiceNote} · ${phrases[entry.status]}${reviewNote}`;
+    if (entry.voice_available === false) {
+      message.textContent += " · This voice is no longer available, so sections cannot be regenerated. Downloads still work.";
+    }
   }
   updateExport(entry);
   renderSections(entry);
@@ -1366,9 +1372,11 @@ byId("script-form").addEventListener("submit", async (event) => {
       value: styleMode === "paragraphs"
         ? { title: byId("recording-title").value, script: script.value,
             sections: paragraphs.flatMap((item) => item.sections.map((part) => ({ text: part.text, instructions: item.style.trim(), pause_ms: part.pause_ms }))),
-            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) }
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value),
+            voice_profile: isAdmin ? undefined : selectedProfile || undefined }
         : { title: byId("recording-title").value, script: script.value, instructions: scriptDirections.field.value,
-            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value) },
+            turbo_settings: scriptAdvanced.value(), voice_match: scriptEngine.field.value, auto_retries: Number(byId("auto-retries").value),
+            voice_profile: isAdmin ? undefined : selectedProfile || undefined },
     });
     sectionSelection.delete(created.id);
     reviewFilter = "all";
@@ -1889,6 +1897,260 @@ byId("compare-start").addEventListener("click", async () => {
   }
 });
 
+// ---- Customer voice picker ----
+let selectedProfile = null;
+
+function renderVoicePicker(catalog) {
+  const picker = byId("voice-picker");
+  if (!picker) return;
+  if (!catalog.some((voice) => voice.id === selectedProfile)) selectedProfile = catalog[0]?.id ?? null;
+  byId("settings-voice").textContent = catalog.length ? "" : "No voices are available yet. Please check back soon.";
+  picker.replaceChildren(...catalog.map((voice) => {
+    const card = element("div", "voice-card");
+    card.setAttribute("role", "radio");
+    card.tabIndex = 0;
+    const choose = () => {
+      selectedProfile = voice.id;
+      for (const other of picker.children) other.setAttribute("aria-checked", String(other === card));
+    };
+    card.setAttribute("aria-checked", String(voice.id === selectedProfile));
+    card.addEventListener("click", (event) => { if (event.target.tagName !== "AUDIO") choose(); });
+    card.addEventListener("keydown", (event) => {
+      if (event.key === " " || event.key === "Enter") { event.preventDefault(); choose(); }
+    });
+    card.append(element("strong", "", voice.name));
+    if (voice.description) card.append(element("p", "", voice.description));
+    if (voice.sample) {
+      const audio = element("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = voice.sample;
+      audio.setAttribute("aria-label", `Sample of ${voice.name}`);
+      audio.addEventListener("play", choose);
+      card.append(audio);
+    }
+    return card;
+  }));
+}
+
+// ---- Voices (admin): catalog, consent and trained voices ----
+const engineLabels = {
+  trained_reference: "Trained voice + reference", maximum: "Maximum resemblance", standard: "Chatterbox Turbo",
+};
+let voiceData = null;
+let editingVoice = null;
+let voicesTimer = null;
+
+async function loadVoices() {
+  window.clearTimeout(voicesTimer);
+  try {
+    voiceData = await request("/api/voices");
+    errorAt("voices-error");
+    renderVoiceCatalog();
+    renderTrainedVoices();
+    if (voiceData.voices.some((voice) => ["queued", "running"].includes(voice.sample_status)) && currentView === "voices") {
+      voicesTimer = window.setTimeout(loadVoices, 3000);
+    }
+  } catch (error) {
+    errorAt("voices-error", error.message);
+  }
+}
+
+function voiceAction(label, handler, quiet = true) {
+  const button = element("button", quiet ? "button button-quiet" : "button button-primary", label);
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      await handler();
+      await loadVoices();
+    } catch (error) {
+      errorAt("voices-error", error.message);
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
+function renderVoiceCatalog() {
+  const list = byId("voice-list");
+  if (!voiceData.voices.length) {
+    list.replaceChildren(element("li", "muted", "No voices yet. Select New voice to add the first one."));
+    return;
+  }
+  list.replaceChildren(...voiceData.voices.map((voice) => {
+    const item = element("li", "voice-item");
+    const title = element("h3", "", voice.name);
+    const stateLabel = voice.consent_revoked_at ? ["revoked", "Consent revoked"] : voice.published ? ["published", "Published"] : ["", "Draft"];
+    title.append(element("span", `voice-state ${stateLabel[0]}`, stateLabel[1]));
+    item.append(title);
+    if (voice.description) item.append(element("p", "muted", voice.description));
+    const parts = [
+      `Reference: ${voice.voice_label || "missing"}`,
+      voice.trained_voice ? `Trained: ${voice.trained_voice}${voice.trained_missing ? " (missing)" : ""}` : "No trained voice",
+      engineLabels[voice.engine],
+      `${voice.recordings} ${voice.recordings === 1 ? "recording" : "recordings"}`,
+    ];
+    item.append(element("p", "muted", parts.join(" · ")));
+    const consent = voice.consent_type === "self" ? "Own voice"
+      : voice.consent_type === "written" ? `Written consent from ${voice.speaker || "?"}${voice.consent_date ? ` (${voice.consent_date})` : ""}`
+      : "No consent recorded";
+    const warn = voice.problem && !voice.consent_revoked_at;
+    const consentLine = element("p", warn ? "error" : "muted", warn ? `${consent} · ${voice.problem}` : consent);
+    if (voice.has_consent_file) {
+      consentLine.append(" · ");
+      const link = element("a", "", "view document");
+      link.href = `/api/admin/voices/${voice.id}/consent`;
+      link.target = "_blank";
+      link.rel = "noopener";
+      consentLine.append(link);
+    }
+    item.append(consentLine);
+    if (voice.sample) {
+      const audio = element("audio");
+      audio.controls = true;
+      audio.preload = "none";
+      audio.src = voice.sample;
+      item.append(audio);
+    } else if (["queued", "running"].includes(voice.sample_status)) {
+      item.append(element("p", "muted", "Making the sample…"));
+    }
+    const actions = element("div", "form-footer compact");
+    if (!voice.consent_revoked_at) {
+      actions.append(voiceAction(voice.published ? "Unpublish" : "Publish",
+        () => change(`/api/admin/voices/${voice.id}/published`, { method: "PUT", value: { published: !voice.published } }),
+        voice.published));
+      actions.append(voiceAction("Edit", async () => openVoiceForm(voice)));
+      actions.append(voiceAction(voice.sample ? "Remake sample" : "Make sample",
+        () => change(`/api/admin/voices/${voice.id}/sample`, { value: {} })));
+      actions.append(voiceAction("Revoke consent", async () => {
+        if (!window.confirm(`Revoke consent for “${voice.name}”? It is unpublished for good, queued recordings with it stop, and customers can no longer regenerate with it.`)) return;
+        await change(`/api/admin/voices/${voice.id}/revoke`);
+      }));
+    }
+    if (!voice.published && !voice.recordings) {
+      actions.append(voiceAction("Delete", async () => {
+        if (!window.confirm(`Delete “${voice.name}”? The consent document stays on file.`)) return;
+        await change(`/api/admin/voices/${voice.id}`, { method: "DELETE" });
+      }));
+    }
+    item.append(actions);
+    return item;
+  }));
+}
+
+function renderTrainedVoices() {
+  const trained = voiceData.trained;
+  byId("trained-list").replaceChildren(...(trained.length
+    ? trained.map((voice) => element("li", "", `${voice.name}${voice.step != null ? ` · step ${voice.step}` : ""}`))
+    : [element("li", "", "None yet.")]));
+}
+
+function setConsentMode(mode) {
+  for (const radio of document.querySelectorAll('input[name="consent"]')) radio.checked = radio.value === mode;
+  byId("written-consent").hidden = mode !== "written";
+}
+
+function openVoiceForm(voice = null) {
+  editingVoice = voice;
+  byId("voice-form-panel").hidden = false;
+  byId("voice-form-heading").textContent = voice ? `Edit ${voice.name}` : "New voice";
+  byId("profile-name").value = voice?.name ?? "";
+  byId("profile-description").value = voice?.description ?? "";
+  byId("profile-reference").replaceChildren(...voiceData.references.map((reference) =>
+    new Option(`${reference.label}${reference.has_transcript ? " · transcript saved" : ""}`, reference.id)));
+  if (voice) byId("profile-reference").value = voice.voice_id;
+  byId("profile-trained").replaceChildren(new Option("None", ""), ...voiceData.trained.map((trained) =>
+    new Option(`${trained.name}${trained.step != null ? ` · step ${trained.step}` : ""}`, trained.name)));
+  byId("profile-trained").value = voice ? voice.trained_voice ?? "" : voiceData.trained[0]?.name ?? "";
+  setConsentMode(voice?.consent_type ?? "");
+  byId("profile-speaker").value = voice?.speaker ?? "";
+  byId("profile-consent-date").value = voice?.consent_date ?? "";
+  byId("profile-consent-file").value = "";
+  byId("consent-file-state").textContent = voice?.has_consent_file ? "A signed consent is on file. Choose a file only to replace it." : "";
+  byId("profile-notes").value = voice?.consent_notes ?? "";
+  errorAt("voice-form-error");
+  byId("voice-form-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+  byId("profile-name").focus();
+}
+
+for (const radio of document.querySelectorAll('input[name="consent"]')) {
+  radio.addEventListener("change", () => setConsentMode(radio.value));
+}
+byId("voice-new")?.addEventListener("click", () => {
+  if (!voiceData?.references.length) {
+    errorAt("voices-error", "Add a reference recording under References first.");
+    return;
+  }
+  openVoiceForm();
+});
+byId("voice-cancel")?.addEventListener("click", () => { byId("voice-form-panel").hidden = true; editingVoice = null; });
+
+byId("voice-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const save = byId("voice-save");
+  const consent = document.querySelector('input[name="consent"]:checked')?.value;
+  const value = {
+    name: byId("profile-name").value, description: byId("profile-description").value,
+    voice_id: byId("profile-reference").value, trained_voice: byId("profile-trained").value,
+    consent_notes: byId("profile-notes").value,
+  };
+  if (consent) value.consent_type = consent;
+  if (consent === "written") {
+    value.speaker = byId("profile-speaker").value;
+    if (byId("profile-consent-date").value) value.consent_date = byId("profile-consent-date").value;
+  }
+  save.disabled = true;
+  errorAt("voice-form-error");
+  try {
+    const saved = editingVoice
+      ? await change(`/api/admin/voices/${editingVoice.id}`, { method: "PUT", value })
+      : await change("/api/admin/voices", { value });
+    const file = byId("profile-consent-file").files[0];
+    if (file && consent === "written") {
+      const form = new FormData();
+      form.append("file", file);
+      await change(`/api/admin/voices/${saved.id}/consent`, { value: form });
+    }
+    byId("voice-form-panel").hidden = true;
+    editingVoice = null;
+    await loadVoices();
+  } catch (error) {
+    errorAt("voice-form-error", error.message);
+  } finally {
+    save.disabled = false;
+  }
+});
+
+byId("trained-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = byId("trained-upload");
+  const config = byId("trained-config").files[0];
+  const weights = byId("trained-weights").files[0];
+  if (!byId("trained-name").value.trim() || !config || !weights) {
+    errorAt("trained-error", "Enter a name and choose both files.");
+    return;
+  }
+  const form = new FormData();
+  form.append("name", byId("trained-name").value.trim());
+  form.append("config", config);
+  form.append("weights", weights);
+  button.disabled = true;
+  errorAt("trained-error");
+  byId("trained-status").textContent = `Uploading ${(weights.size / 1048576).toFixed(0)} MB…`;
+  try {
+    await change("/api/admin/trained", { value: form });
+    byId("trained-form").reset();
+    byId("trained-status").textContent = "Uploaded. Choose it when you create or edit a voice.";
+    await loadVoices();
+  } catch (error) {
+    errorAt("trained-error", error.message);
+    byId("trained-status").textContent = "";
+  } finally {
+    button.disabled = false;
+  }
+});
+
 // ---- Accounts ----
 byId("sign-out")?.addEventListener("click", async () => {
   try { await change("/api/auth/logout"); } finally { window.location.replace("/login"); }
@@ -1969,7 +2231,7 @@ async function updateAccount(account, value, question) {
 }
 
 function renderReview(items) {
-  const filter = byId("review-filter");
+  const filter = byId("review-scope");
   filter.replaceChildren();
   if (reviewUser) {
     filter.append(`Showing ${reviewUser.email} · `);

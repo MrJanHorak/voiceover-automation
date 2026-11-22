@@ -28,7 +28,8 @@ from .settings import TurboSettings
 from .store import CHUNK_LIMIT, INSTRUCTIONS_LIMIT, MAX_PAUSE_MS, PARAGRAPH_PAUSE_MS, SCRIPT_LIMIT, TRAINED_MATCHES, TRANSCRIPT_LIMIT, Store, StudioError, new_id, split_script_with_pauses, validate_directions
 from .accounts import DUMMY_HASH, SESSION_COOKIE, SESSION_DAYS, RateLimiter, check_password, hash_password, new_token, normalize_email, token_hash, verify_password
 from .inbox import SCAN_SECONDS, Inbox, unique
-from .trained import find_trained
+from .catalog import CONSENT_MEDIA, SAMPLE_TEXT, consent_extension, install_trained
+from .trained import find_trained, list_trained
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -79,6 +80,27 @@ class JobInput(BaseModel):
     turbo_settings: TurboSettings | None = None
     voice_match: VoiceMatch = "standard"
     auto_retries: Literal[0, 1, 2] = 1
+    # A published catalog voice; customers choose one, admins may too.
+    voice_profile: Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")] | None = None
+
+
+class ProfileInput(BaseModel):
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=60)] | None = None
+    description: Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)] | None = None
+    voice_id: UUID | None = None
+    trained_voice: Annotated[str, StringConstraints(strip_whitespace=True, max_length=64)] | None = None
+    speaker: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] | None = None
+    consent_type: Literal["self", "written"] | None = None
+    consent_date: Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$")] | None = None
+    consent_notes: Annotated[str, StringConstraints(strip_whitespace=True, max_length=1000)] | None = None
+
+
+class PublishInput(BaseModel):
+    published: bool
+
+
+class SampleInput(BaseModel):
+    text: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=CHUNK_LIMIT)] = SAMPLE_TEXT
 
 
 class SignInInput(BaseModel):
@@ -382,6 +404,43 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             return "maximum"
         return "standard"
 
+    def profile_match(profile):
+        """The engine a catalog voice uses: its trained voice with the reference when possible."""
+        if profile.get("trained_voice") and directed.available and find_trained(store.root / "trained", profile["trained_voice"]):
+            return "trained_reference"
+        if directed.available and profile.get("voice_transcript"):
+            return "maximum"
+        return "standard"
+
+    def available_profile(profile_id):
+        """A published voice a recording may use, or a clear error."""
+        profiles = store.profiles(published_only=True)
+        if not profiles:
+            raise StudioError("No voices are available yet. Please try again later.", 409)
+        if profile_id is None:
+            return profiles[0]
+        profile = next((item for item in profiles if item["id"] == profile_id), None)
+        if profile is None:
+            raise StudioError("This voice is no longer available. Choose another voice.", 409)
+        return profile
+
+    def sample_url(profile):
+        return f"/api/voices/{profile['id']}/sample" if profile.get("sample_status") == "ready" and profile.get("sample_export") else None
+
+    def public_profile(profile):
+        return {"id": profile["id"], "name": profile["name"], "description": profile["description"],
+                "sample": sample_url(profile)}
+
+    def admin_profile(profile):
+        return {**{key: profile[key] for key in (
+                    "id", "name", "description", "voice_id", "voice_label", "trained_voice", "published", "speaker",
+                    "consent_type", "consent_date", "consent_notes", "consent_recorded_at", "consent_revoked_at",
+                    "sample_status", "recordings", "created_at")},
+                "has_consent_file": bool(profile["consent_file"]), "has_transcript": bool(profile["voice_transcript"]),
+                "engine": profile_match(profile), "problem": store.consent_problem(profile), "sample": sample_url(profile),
+                "trained_missing": bool(profile["trained_voice"]) and not find_trained(store.root / "trained",
+                                                                                     profile["trained_voice"])}
+
     def intake_job(title, script, source="inbox"):
         """Hands-off recording with the owner's preferred setup."""
         trained = current_trained()
@@ -619,6 +678,108 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             raise StudioError("Account not found.", 404)
         return {"usage": store.usage(user_id.hex)}
 
+    # ---- Voice catalog ----
+
+    @app.get("/api/voices")
+    def voices(user: Annotated[dict, Depends(require_user)]):
+        if user["role"] != "admin":
+            return {"voices": [public_profile(profile) for profile in store.profiles(published_only=True)]}
+        references = store.state()["voices"]
+        return {"voices": [admin_profile(profile) for profile in store.profiles()],
+                "references": [{"id": item["id"], "label": item["label"], "has_transcript": bool(item["transcript"])}
+                               for item in references],
+                "trained": [{"name": item["name"], "step": item["step"]} for item in list_trained(store.root / "trained")],
+                "directed_available": directed.available}
+
+    @app.get("/api/voices/{profile_id}/sample")
+    def voice_sample(profile_id: UUID, user: Annotated[dict, Depends(require_user)]):
+        profile = store.profile(profile_id.hex)
+        visible = profile and (user["role"] == "admin" or (profile["published"] and not profile["consent_revoked_at"]))
+        if not visible or not sample_url(profile):
+            raise StudioError("This voice has no sample yet.", 404)
+        return file_response(store.recordings / profile["sample_job_id"] / f"{profile['sample_export']}.mp3", "audio/mpeg")
+
+    @app.post("/api/admin/voices", dependencies=admin_mutations, status_code=201)
+    def create_profile(data: ProfileInput):
+        values = data.model_dump(exclude_none=True)
+        if "voice_id" in values:
+            values["voice_id"] = values["voice_id"].hex
+        if values.get("trained_voice") and not find_trained(store.root / "trained", values["trained_voice"]):
+            raise StudioError("Choose a trained voice from the list.", 404)
+        values["trained_voice"] = values.get("trained_voice") or None
+        return admin_profile(store.save_profile(values))
+
+    @app.put("/api/admin/voices/{profile_id}", dependencies=admin_mutations)
+    def update_profile(profile_id: UUID, data: ProfileInput):
+        values = data.model_dump(exclude_unset=True)
+        if values.get("voice_id"):
+            values["voice_id"] = values["voice_id"].hex
+        if "trained_voice" in values and values["trained_voice"] == "":
+            values["trained_voice"] = None
+        if values.get("trained_voice") and not find_trained(store.root / "trained", values["trained_voice"]):
+            raise StudioError("Choose a trained voice from the list.", 404)
+        return admin_profile(store.save_profile(values, profile_id.hex))
+
+    @app.put("/api/admin/voices/{profile_id}/published", dependencies=admin_mutations)
+    def publish_profile(profile_id: UUID, data: PublishInput):
+        return admin_profile(store.publish_profile(profile_id.hex, data.published))
+
+    @app.post("/api/admin/voices/{profile_id}/revoke", dependencies=admin_mutations)
+    def revoke_profile(profile_id: UUID):
+        return admin_profile(store.revoke_consent(profile_id.hex))
+
+    @app.delete("/api/admin/voices/{profile_id}", dependencies=admin_mutations, status_code=204)
+    def delete_profile(profile_id: UUID):
+        store.delete_profile(profile_id.hex)
+        # The consent document is kept (in consent/) as a record even after the voice is deleted.
+        return Response(status_code=204)
+
+    @app.post("/api/admin/voices/{profile_id}/consent", dependencies=admin_mutations)
+    def upload_consent(profile_id: UUID, file: Annotated[UploadFile, File()]):
+        contents = file.file.read(10 * 1024 * 1024 + 1)
+        extension = consent_extension(contents)
+        folder = store.root / "consent"
+        folder.mkdir(parents=True, exist_ok=True)
+        name = f"{profile_id.hex}-{new_id()}{extension}"
+        (folder / name).write_bytes(contents)
+        try:
+            store.set_consent_file(profile_id.hex, name)
+        except Exception:
+            (folder / name).unlink(missing_ok=True)
+            raise
+        return admin_profile(store.profile(profile_id.hex))
+
+    @app.get("/api/admin/voices/{profile_id}/consent", dependencies=admin_only)
+    def consent_document(profile_id: UUID):
+        profile = store.profile(profile_id.hex)
+        if not profile or not profile["consent_file"]:
+            raise StudioError("No consent document on file.", 404)
+        path = store.root / "consent" / profile["consent_file"]
+        return file_response(path, CONSENT_MEDIA.get(path.suffix, "application/octet-stream"),
+                             f"consent-{safe_name(profile['name'])}{path.suffix}")
+
+    @app.post("/api/admin/voices/{profile_id}/sample", dependencies=admin_mutations, status_code=202)
+    def make_sample(profile_id: UUID, data: SampleInput):
+        """Render a short sample customers can play before choosing the voice. Hidden from recording lists."""
+        profile = store.profile(profile_id.hex)
+        if profile is None:
+            raise StudioError("Voice not found.", 404)
+        if profile["consent_revoked_at"]:
+            raise StudioError("Consent for this voice was revoked.", 409)
+        job_id = store.create_job(f"Sample · {profile['name']}", data.text, "", None, None, profile_match(profile),
+                                  directed.available, 1 if checker.available else 0, profile["trained_voice"],
+                                  blind=2, source="sample", voice_id=profile["voice_id"], voice_profile_id=profile["id"],
+                                  voice_label=profile["name"])
+        store.set_sample(profile["id"], job_id)
+        return admin_profile(store.profile(profile["id"]))
+
+    @app.post("/api/admin/trained", dependencies=admin_mutations, status_code=201)
+    def upload_trained(name: Annotated[str, Form()], config: Annotated[UploadFile, File()],
+                       weights: Annotated[UploadFile, File()]):
+        target = install_trained(store.root / "trained", name, config.file, weights.file)
+        return {"name": target.name, "trained": [{"name": item["name"], "step": item["step"]}
+                                                 for item in list_trained(store.root / "trained")]}
+
     @app.get("/", include_in_schema=False)
     def home(request: Request):
         user = current_user(request)
@@ -644,9 +805,10 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     @app.get("/api/state")
     def state(user: Annotated[dict, Depends(require_user)]):
         if user["role"] == "customer":
-            voice = store.active_voice()
-            house = {"id": "house", "label": "Studio voice", "duration": 0, "transcript": "ready"} if voice else None
-            return {**store.state(user["id"]), "voice": house, "voices": [], "reference_notice": None,
+            catalog = [public_profile(profile) for profile in store.profiles(published_only=True)]
+            # `voice` keeps the page's "ready to generate" check working; customers choose from `catalog`.
+            voice = {"id": "catalog", "label": catalog[0]["name"], "duration": 0, "transcript": "ready"} if catalog else None
+            return {**store.state(user["id"]), "voice": voice, "voices": [], "catalog": catalog, "reference_notice": None,
                     "trained_voice": None, "account": account_view(user)}
         return {**store.state(), "reference_notice": app.state.reference_notice, "trained_voice": current_trained(),
                 "account": account_view(user)}
@@ -830,7 +992,8 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     @app.post("/api/jobs", dependencies=mutations, status_code=202)
     def create_job(data: JobInput, user: Annotated[dict, Depends(require_user)]):
         customer = user["role"] == "customer"
-        voice_match = house_match() if customer else data.voice_match
+        profile = available_profile(data.voice_profile) if customer or data.voice_profile else None
+        voice_match = profile_match(profile) if profile else data.voice_match
         if customer and store.active_jobs(user["id"]) >= CUSTOMER_ACTIVE_LIMIT:
             raise StudioError(f"You already have {CUSTOMER_ACTIVE_LIMIT} recordings in progress. "
                               "Wait for one to finish, then try again.", 429)
@@ -838,7 +1001,7 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
         if data.sections is not None:
             prepared = [{"text": item.text, "instructions": item.instructions or "",
                          "pause_ms": PARAGRAPH_PAUSE_MS if item.pause_ms is None else item.pause_ms,
-                         "voice_match": voice_match if customer else (item.voice_match or data.voice_match)}
+                         "voice_match": voice_match if profile else (item.voice_match or data.voice_match)}
                         for item in data.sections]
             combined = "\n\n".join(item["text"] for item in prepared)
             if len(combined) > SCRIPT_LIMIT:
@@ -850,13 +1013,14 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
             validate_directions(data.script, data.instructions, directed.available)
             script = data.script
         # Customers use the studio voice with the admin's settings; engine options are for the admin.
-        settings = data.turbo_settings.model_dump() if data.turbo_settings and not customer else None
-        trained = current_trained()
+        settings = data.turbo_settings.model_dump() if data.turbo_settings and not profile else None
+        trained = profile["trained_voice"] if profile else (current_trained() or {}).get("name")
         retries = (1 if checker.available else 0) if customer else data.auto_retries
         return {"id": store.create_job(data.title or "Untitled recording", script, data.instructions, prepared, settings,
-                                       voice_match, directed.available, retries,
-                                       trained["name"] if trained else None, user_id=owner_id(user),
-                                       voice_label="Studio voice" if customer else None)}
+                                       voice_match, directed.available, retries, trained, user_id=owner_id(user),
+                                       voice_label=profile["name"] if profile else None,
+                                       voice_id=profile["voice_id"] if profile else None,
+                                       voice_profile_id=profile["id"] if profile else None)}
 
     @app.get("/api/comparisons", dependencies=admin_only)
     def comparisons():
@@ -891,8 +1055,11 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
     def job_details(job_id: UUID, user: Annotated[dict, Depends(require_user)]):
         job = store.job(job_id.hex)
         pairs = store.pronunciation_pairs(job["user_id"])  # Admins' own words are global, so this is safe for them.
+        profile = store.profile(job["voice_profile_id"]) if job["voice_profile_id"] else None
         details = {
             **{key: job[key] for key in ("id", "title", "script", "instructions", "engine", "created_at", "status", "error", "export")},
+            "voice_name": profile["name"] if profile else None,
+            "voice_available": bool(profile and profile["published"] and not profile["consent_revoked_at"]) if profile else None,
             "voice_reference": job["voice_label"],
             "voice_transcript_ready": bool(job["voice_transcript"]),
             "trained_voice": job["trained_voice"],
@@ -928,11 +1095,17 @@ def create_app(data_dir=None, engine=None, directed_engine=None, quality_checker
 
     @app.post("/api/jobs/{job_id}/sections/{number}", dependencies=job_mutations, status_code=202)
     def regenerate(job_id: UUID, number: int, data: SectionInput, user: Annotated[dict, Depends(require_user)]):
-        customer = user["role"] == "customer"
-        settings = data.turbo_settings.model_dump() if data.turbo_settings and not customer else None
+        job = store.job(job_id.hex)
+        profile = None
+        if job["voice_profile_id"]:
+            # A voice that was unpublished or whose consent was revoked cannot make new audio.
+            profile = available_profile(job["voice_profile_id"])
+        elif user["role"] == "customer":
+            raise StudioError("This recording's voice is no longer available.", 409)
+        settings = data.turbo_settings.model_dump() if data.turbo_settings and not profile else None
         trained = current_trained()
         store.regenerate(job_id.hex, number, data.text, data.instructions, directed.available, settings,
-                         house_match() if customer else data.voice_match, trained["name"] if trained else None)
+                         profile_match(profile) if profile else data.voice_match, trained["name"] if trained else None)
         return {"id": job_id.hex}
 
     @app.put("/api/jobs/{job_id}/sections/{number}/pause", dependencies=job_mutations, status_code=202)

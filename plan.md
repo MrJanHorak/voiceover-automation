@@ -14,7 +14,7 @@ Turn customer scripts into voice-over audio using a clone of the owner's voice. 
 2. Start the studio. The terminal prints a setup code: open the studio and create the admin account (the brother-in-law's or the owner's email).
 3. In a private browser window, sign up as a test customer at `/signup`. Make a short recording and check that only New recording, Recordings and Guide are visible and that engine settings are hidden.
 4. As admin, open **Customers**: the test customer and their script should be listed. Try **Disable**, then sign in as the customer again (it should be refused), then **Enable**.
-5. Then Phase 2 step 2: the voice catalog (voice profiles with consent records, adapter upload, publish, and a customer voice picker).
+5. Phase 2 step 2, the voice catalog, is implemented (see Direction · 2026-11-21). Run the tests, including `tests/test_catalog.py`. Open **Voices**: the existing voice is now a published "Studio voice"; review its consent and description, then **Make sample**. As a customer, choose the voice on the Settings step and play the sample. Optionally upload a second trained voice (for example step 200 from the results zip) and create a draft voice with it.
 
 
 **Status on 2026-11-20, late evening:** the owner's blind comparisons favored **Trained voice + reference** (step150), with Maximum resemblance a close second. It is now the default engine when a trained voice is present (roadmap step 7 done). Roadmap step 8, hands-off intake, is implemented but has not yet run on Windows (see "Hands-off intake" below). Next session:
@@ -358,7 +358,14 @@ Customers never see engine names, seeds or other technical settings, and never s
 
 **Steps:**
 1. Accounts and roles: users and sessions; sign-up, login and logout; per-user recordings; owner checks on every route; admin-only voice and training routes; per-user pronunciations; admin review with account disabling. Customers use the house voice: the admin's active reference plus the trained voice, with the admin's chosen engine. *(Implemented 2026-11-21, first Windows run pending. Details: `studio/accounts.py` uses scrypt hashes, 30-day HttpOnly SameSite=Lax session cookies with only their SHA-256 stored, and an in-memory rate limiter. The first admin is created with a setup code printed to the terminal. The `usage_log` table keeps every submitted script and section edit after deletion. Customers can have 3 active recordings. `VOICEOVER_AUTH=off` keeps single-owner mode.)*
-2. Voice catalog: voice profiles (reference, transcript, trained adapter, display name, description, consent record), adapter upload in the admin UI, publish and unpublish, and a customer voice picker.
+2. Voice catalog: voice profiles (reference, transcript, trained adapter, display name, description, consent record), adapter upload in the admin UI, publish and unpublish, and a customer voice picker. *(Implemented 2026-11-21, first Windows run pending. Details:*
+   - *`voice_profiles` table; `jobs.voice_profile_id`. A profile's engine is computed: trained_reference, then maximum, then standard.*
+   - *Publishing requires consent: `self`, or `written` with the speaker's name and a signed PDF/PNG/JPEG in `data/studio/consent/`, checked by content.*
+   - *Revocation is permanent. It fails queued jobs and blocks regeneration (409), while downloads keep working.*
+   - *Samples are hidden jobs (`jobs.blind = 2`) served at `/api/voices/{id}/sample`.*
+   - *Trained-voice upload checks `lora_config.json` with `read_config` and the safetensors header for LoRA keys, then stages and renames into `data/studio/trained/`.*
+   - *On upgrade, the active voice became a published "Studio voice" with own-voice consent, once, marked in the `meta` table.*
+   - *Cosmetic: the top bar stays on one row, with shorter admin labels (Voices, References, Training), the engine status moved to the Voices page, and the duplicate "Delivery style" label removed. Fixed a duplicate `review-filter` id between the Customers page and the Recordings section filter.)*
 3. Internet readiness: hosting choice, HTTPS, email (verification and reset), rate limits and per-account quotas, fair queueing, backups and a tested restore, retention policy. Behind a reverse proxy, run uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy>`, so sign-in rate limits see real client addresses instead of the proxy's. Also set `VOICEOVER_ALLOWED_HOSTS` and `VOICEOVER_SECURE_COOKIES=1`, and add a Content-Security-Policy.
 4. Billing: Stripe, credits and usage metering by audio length, plus receipts.
 

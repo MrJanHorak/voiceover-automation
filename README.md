@@ -27,7 +27,27 @@ Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python an
 The studio has sign-in. On the first start with accounts, the terminal prints a **setup code**. Open the studio, which goes to the sign-in page, and create the admin account with that code. Existing recordings, voices and training data remain visible to the admin.
 
 - **Admin:** everything, including **Voice and words**, **Voice training**, trained voices, the inbox and outbox, and **Customers**. On the Customers page, the admin can review every script customers have submitted (also after a customer deletes the recording), open and listen to their recordings, disable an account (it is signed out, its queued recordings stop, and it cannot sign in), and make another account an admin. The studio always keeps at least one active admin.
-- **Customers:** create an account at `/signup` by accepting the terms of use. They get **New recording**, their own **Recordings** and the **Guide**. Their recordings use the studio voice with the admin's settings (currently Trained voice + reference); engine choices, seeds and model details are hidden. They can keep their own pronunciation list on top of the admin's global list. Each customer can have at most 3 recordings in progress, and downloads are available as soon as a recording is ready.
+- **Customers:** create an account at `/signup` by accepting the terms of use. They get **New recording**, their own **Recordings** and the **Guide**. On the Settings step they choose one of the published **voices** (with a sample to play). The voice's engine settings apply automatically, and engine choices, seeds and model details are hidden. They can keep their own pronunciation list on top of the admin's global list. Each customer can have at most 3 recordings in progress, and downloads are available as soon as a recording is ready.
+
+**Voices (admin).** The **Voices** page is the catalog customers choose from. Each voice combines:
+
+- a name and description customers see
+- a reference recording from **References**
+- optionally a trained voice
+- the speaker's consent
+
+To add a voice:
+
+1. Add the speaker's reference recording under **References**. Save its transcript too, so the voice can fall back to maximum resemblance.
+2. Under **Trained voices**, upload the speaker's `lora_config.json` and `lora_weights.safetensors` from one checkpoint folder of the training results. Give it a name such as `jan-step150`. Both files are checked before they are saved to `data/studio/trained/<name>/`.
+3. Select **New voice**. Enter the name and description, then choose the reference and trained voice. Record consent: **This is my own voice**, or **Another person has given written consent** with the speaker's name, date and the signed document (PDF, PNG or JPEG). Documents are kept in `data/studio/consent/`, outside Git, and are only available to admins.
+4. Select **Make sample** to render a short sentence customers can play, then **Publish**.
+
+The voice uses the trained voice plus reference when one is set and VoxCPM2 is available, otherwise maximum resemblance (with a transcript), otherwise Chatterbox.
+
+A voice cannot be published without consent on record. **Unpublish** hides it from new recordings. **Revoke consent** is permanent: the voice is unpublished for good, queued recordings with it stop, and customers can still download existing recordings but no longer regenerate them. A voice can be deleted only while unpublished and unused; its consent document stays on file.
+
+When the catalog was added, the studio's existing voice became a published "Studio voice" with "own voice" consent, so customers kept a voice. Review its name, description and consent on the Voices page.
 
 Passwords are stored as scrypt hashes, and sessions are HttpOnly cookies valid for 30 days. Sign-in is rate-limited per email and network address. Every change still needs the studio's request header, which blocks cross-site requests.
 

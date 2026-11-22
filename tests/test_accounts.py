@@ -176,7 +176,15 @@ class AccountApiTests(unittest.TestCase):
                                     ("get", "/api/voice/current/audio"), ("post", "/api/dataset/export")):
                     self.assertEqual(getattr(ana, method)(url, headers=headers).status_code, 403, url)
 
-                # A customer's recording uses the studio voice, whatever engine is requested.
+                # Customers record only with a published voice: none yet.
+                self.assertEqual(ana.post("/api/jobs", headers=headers, json={"script": "Too early."}).status_code, 409)
+                reference = admin.get("/api/voices").json()["references"][0]["id"]
+                profile = admin.post("/api/admin/voices", headers=headers, json={
+                    "name": "Studio voice", "voice_id": reference, "consent_type": "self"}).json()
+                self.assertEqual(admin.put(f"/api/admin/voices/{profile['id']}/published", headers=headers,
+                                           json={"published": True}).status_code, 200)
+
+                # A customer's recording uses the published voice's settings, whatever engine is requested.
                 created = ana.post("/api/jobs", headers=headers,
                                    json={"script": "Private customer script.", "voice_match": "maximum"})
                 self.assertEqual(created.status_code, 202)
