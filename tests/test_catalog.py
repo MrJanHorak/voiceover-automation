@@ -30,7 +30,7 @@ class CatalogStoreTests(unittest.TestCase):
         self.store.add_voice("voice", "Reference", 7.0)
 
     def make(self, **values):
-        return self.store.save_profile({"name": "Jan · warm", "voice_id": "voice", **values})
+        return self.store.save_profile({"name": "Alex · warm", "voice_id": "voice", **values})
 
     def test_existing_voice_becomes_the_first_profile_once(self):
         # A new studio has no voice at first start, so nothing is seeded, then or later.
@@ -55,7 +55,7 @@ class CatalogStoreTests(unittest.TestCase):
         with self.assertRaises(StudioError) as missing:
             self.store.publish_profile(profile["id"], True)
         self.assertEqual(missing.exception.status, 409)
-        self.store.save_profile({"consent_type": "written", "speaker": "Jan Horak"}, profile["id"])
+        self.store.save_profile({"consent_type": "written", "speaker": "Test Speaker"}, profile["id"])
         with self.assertRaises(StudioError):  # Written consent needs the signed document.
             self.store.publish_profile(profile["id"], True)
         self.store.set_consent_file(profile["id"], "signed.pdf")
@@ -114,10 +114,10 @@ class CatalogFileTests(unittest.TestCase):
     def test_trained_voice_upload(self):
         with TemporaryDirectory(dir=".tools") as temporary:
             root = Path(temporary) / "trained"
-            target = install_trained(root, "jan-step150", io.BytesIO(CONFIG), io.BytesIO(safetensors_bytes()))
+            target = install_trained(root, "speaker-step150", io.BytesIO(CONFIG), io.BytesIO(safetensors_bytes()))
             self.assertEqual(sorted(path.name for path in target.iterdir()), ["lora_config.json", "lora_weights.safetensors"])
             with self.assertRaises(StudioError) as exists:
-                install_trained(root, "jan-step150", io.BytesIO(CONFIG), io.BytesIO(safetensors_bytes()))
+                install_trained(root, "speaker-step150", io.BytesIO(CONFIG), io.BytesIO(safetensors_bytes()))
             self.assertEqual(exists.exception.status, 409)
             for name, config, weights in (("../escape", CONFIG, safetensors_bytes()),
                                           ("bad-config", b"{}", safetensors_bytes()),
@@ -126,9 +126,9 @@ class CatalogFileTests(unittest.TestCase):
                 with self.assertRaises(StudioError, msg=name):
                     install_trained(root, name, io.BytesIO(config), io.BytesIO(weights))
             # Failed uploads leave nothing behind.
-            self.assertEqual([path.name for path in root.iterdir()], ["jan-step150"])
+            self.assertEqual([path.name for path in root.iterdir()], ["speaker-step150"])
             with self.assertRaises(StudioError):
-                check_safetensors(root / "jan-step150" / "lora_config.json")
+                check_safetensors(root / "speaker-step150" / "lora_config.json")
 
 
 class CatalogApiTests(unittest.TestCase):

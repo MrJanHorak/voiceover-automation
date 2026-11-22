@@ -2,18 +2,49 @@
 
 ## Goal
 
-Turn customer scripts into voice-over audio using a clone of the owner's voice. Start with a private browser-based studio on the owner's Windows laptop. The owner reviews every recording and downloads the finished file for manual delivery. Self-host the studio once the local workflow is reliable. Add customer access, subscriptions, and automated fulfillment in Phase 2.
+Turn scripts into voice-over audio with cloned voices. An **admin** creates voices (a reference recording, an optional trained voice and the speaker's recorded consent) and publishes them. **Customers** sign up, choose a published voice, write scripts, edit sections and download their recordings; the admin can review every customer recording for misuse. The studio runs locally first. The planned online setup is a small VPS for the website plus a serverless GPU for rendering. Payments (per creation or subscription) come last.
 
-## Current handoff · 2026-11-19 (end of day)
+## Current state · 2026-11-22
 
 ### Resume here
+
+**Working and checked on Windows with a GPU:**
+- The three-step recording flow, with written-out numbers, pronunciations, delivery styles, automatic checks with retries, a 48 kHz master and loudness targets.
+- Trained voices (VoxCPM2 LoRA). Trained voice + reference won the blind comparison.
+- The hands-off inbox and outbox.
+- Accounts: admin setup code, open customer sign-up, per-customer recordings, admin review with Disable/Enable, and read-only customer recordings for admins.
+- The voice catalog: profiles with consent, trained-voice upload, samples, publish and revoke.
+
+**Built, not yet run for real:**
+- Split hosting: `studio/remote.py`, `worker/` and `deploy/`, tested against fakes.
+- The free sharing script `scripts/share-studio.ps1`.
+
+**Decisions:**
+- Hosting is the split setup: a Hetzner VPS plus Runpod Serverless flex workers. Vercel was ruled out because the studio is one Python app with a background worker and files on disk.
+- There is no domain yet, so there is no email service or Stripe yet.
+- Next is a free proof of concept on the local GPU studio shared through a Cloudflare Quick Tunnel.
+
+**Next steps:**
+1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`), then commit and push.
+2. **Proof of concept.** Install cloudflared once (`winget install --id Cloudflare.cloudflared`), then run `scripts\share-studio.ps1`. Share the printed `https://….trycloudflare.com` address with a test user, who signs up and records. The admin reviews under **Customers**. Collect feedback.
+3. If the project continues:
+   1. Register a domain.
+   2. Pick an email provider (free tiers: Resend 3,000 a month, Brevo 300 a day).
+   3. Build email verification and password reset, fair queueing and per-customer daily limits.
+   4. Create the Hetzner VPS and the Runpod endpoint. They cost money, so approve the prices first.
+   5. Deploy with `deploy/README.md` and `worker/README.md`.
+   6. Build Stripe billing (Phase 2 step 4).
+
+Never create, start or delete paid cloud resources without explicit approval of the price.
+
+### Earlier status notes (newest first)
 
 **Status on 2026-11-22:** the voice catalog works; the owner published a second voice and a customer recorded with it. Split hosting (Phase 2 step 3) is built but not deployed:
 - `studio/remote.py`: the studio side, `VOICEOVER_DIRECTED_DEVICE=remote`.
 - `worker/`: the Runpod Serverless handler and Dockerfile, built from GitHub.
 - `deploy/`: the VPS setup script, Caddy, systemd, environment template, and backup and restore, with a round trip tested with a stand-in sqlite3.
 
-**Owner decision (2026-11-22):** no domain yet, so no email service or Stripe yet. First, a free proof of concept for the brother-in-law: run the GPU studio on the owner's PC and share it with `scripts/share-studio.ps1` (Cloudflare Quick Tunnel, random `*.trycloudflare.com` address, testing only). Vercel was considered and ruled out: the studio is one Python app with a background render worker, SQLite and audio files on disk. For email later, the free tiers are Resend (3,000 a month, 100 a day) and Brevo (300 a day); both need the studio's own domain for sending to customers.
+**Decision (2026-11-22):** no domain yet, so no email service or Stripe yet. First, a free proof of concept for a test user: run the GPU studio on the owner's PC and share it with `scripts/share-studio.ps1` (Cloudflare Quick Tunnel, random `*.trycloudflare.com` address, testing only). Vercel was considered and ruled out: the studio is one Python app with a background render worker, SQLite and audio files on disk. For email later, the free tiers are Resend (3,000 a month, 100 a day) and Brevo (300 a day); both need the studio's own domain for sending to customers.
 
 Next session:
 1. Run the tests (new: `tests/test_remote.py`).
@@ -24,7 +55,7 @@ Next session:
 **Status on 2026-11-21, evening:** the owner created the admin account with the setup code, signed up a customer and made a recording on the GPU studio. Phase 2 step 1 works end to end, including the Customers page and Disable/Enable. Follow-up from the owner's feedback: admins now see a **My recordings / Customers** switch in the Recordings list, with the customer's email on each entry. An opened customer recording shows a **Customer recording · name · email** banner with **View account**. Customer recordings are read-only for admins: the server allows only GET and DELETE, and also refuses to send them to the outbox. Earlier: Phase 2 step 1 (accounts and roles) was implemented; the inbox and approval workflow from 2026-11-20 worked for the owner. Next session:
 
 1. Run the tests (`.\.tools\directed-env\Scripts\python.exe -m unittest discover -s tests`). The new `tests/test_accounts.py` includes an end-to-end test covering setup, sign-up, isolation, review and disabling; report failures.
-2. Start the studio. The terminal prints a setup code: open the studio and create the admin account (the brother-in-law's or the owner's email).
+2. Start the studio. The terminal prints a setup code: open the studio and create the admin account.
 3. In a private browser window, sign up as a test customer at `/signup`. Make a short recording and check that only New recording, Recordings and Guide are visible and that engine settings are hidden.
 4. As admin, open **Customers**: the test customer and their script should be listed. Try **Disable**, then sign in as the customer again (it should be refused), then **Enable**.
 5. Phase 2 step 2, the voice catalog, is implemented (see Direction · 2026-11-21). Run the tests, including `tests/test_catalog.py`. Open **Voices**: the existing voice is now a published "Studio voice"; review its consent and description, then **Make sample**. As a customer, choose the voice on the Settings step and play the sample. Optionally upload a second trained voice (for example step 200 from the results zip) and create a draft voice with it.
@@ -345,9 +376,9 @@ Run the same application and worker on a machine the owner controls. Start with 
 
 ### Direction · 2026-11-21
 
-The studio becomes a voice platform. The **admin** (the owner's brother-in-law, with the owner for QA and troubleshooting) creates and publishes voice models. **Customers** sign up, choose a published voice, write scripts, edit sections and download their own recordings. Owner decisions:
+The studio becomes a voice platform. The **admin** (whoever creates and manages the voices, with further admin accounts for QA and troubleshooting) creates and publishes voice models. **Customers** sign up, choose a published voice, write scripts, edit sections and download their own recordings. Owner decisions:
 
-- **One role with full control (admin).** Several admin accounts are allowed (the brother-in-law and the owner); there are no separate voice-creator tenants yet.
+- **One role with full control (admin).** Several admin accounts are allowed (for example an operator and a developer); there are no separate voice-creator tenants yet.
 - **Open customer sign-up.** Customers accept the terms at sign-up. Email verification and password reset arrive with step 3 (email sending).
 - **Immediate downloads.** Customers download as soon as a recording is ready. The admin can review every customer recording, listen, and disable an account or delete a recording if a voice is used for hurtful or illegal content. Every generation stays logged with its account, script and voice.
 - **Payment later:** a one-time fee per creation or a monthly subscription. The planned model is credits: packs bought once, plus a monthly allowance, with recordings charged by length. Payments go through Stripe Checkout and the customer portal, with idempotent webhooks.

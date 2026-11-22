@@ -1,17 +1,74 @@
-# Local voice-over studio
+# Voice-over studio
 
-This project runs a private browser studio for turning scripts into recordings in your voice. The command-line voice trial is also available for short model comparisons. See [plan.md](plan.md) for the project milestones and [AGENTS.md](AGENTS.md) for development instructions.
+A browser studio that turns scripts into voice-over recordings with cloned voices. An **admin** records and trains voices, documents each speaker's consent and publishes them. **Customers** sign up, pick a published voice, write or import a script, fix individual sections and download WAV or MP3 files. VoxCPM2 (with optional trained LoRA voices) and Chatterbox Turbo do the speech; every recording carries an AI watermark.
 
-For the latest project status and the steps to resume, see [Resume here](plan.md#resume-here) in the plan. The studio is local-only. As of 2026-11-19 it supports maximum-resemblance cloning, written-out numbers and a pronunciation list, a 48 kHz master with a final loudness pass, and automatic transcription checks with retries. Some of these still need a listening check.
+**Status (2026-11-22):** the studio runs locally on Windows with an NVIDIA GPU, with accounts, the voice catalog and trained voices working. Online hosting (a small VPS plus a serverless GPU) is built but not yet deployed. Email verification, password reset and payments are still to come. See [plan.md](plan.md#resume-here) for the current state and next steps, and [AGENTS.md](AGENTS.md) for development rules.
 
-## Start the browser studio
+## Ways to run it
+
+| Goal | How | Cost |
+| --- | --- | --- |
+| Use it on one computer | [Start the studio](#start-the-studio), after the [setup steps](#1-set-up-python-and-chatterbox-turbo) | Free |
+| Let others test it (proof of concept) | [Share a local studio for testing](#share-a-local-studio-for-testing) | Free |
+| Run it online for customers | [deploy/README.md](deploy/README.md) (website on a VPS) and [worker/README.md](worker/README.md) (rendering on a serverless GPU) | VPS from a few euros a month, plus GPU time per second |
+| Train a voice | Record on the **Training** page, then [training/README.md](training/README.md) on a rented GPU | About $1 per training run |
+
+## A quick tour
+
+The screenshots use invented demo data. To regenerate them after interface changes, see [docs/screenshots](docs/screenshots/demo_server.py).
+
+**Customers** create an account by accepting the terms of use:
+
+![Sign-up page with name, email, password and terms of use](docs/screenshots/signup.png)
+
+They write or import a script and add pronunciations for names and brands:
+
+![Script step with a four-paragraph script and two saved pronunciations](docs/screenshots/customer-script.png)
+
+**Preview spoken** shows exactly what the voice will say. Dates, prices, times and phone numbers are written out (green), and the customer's pronunciations are shown in purple:
+
+![Spoken preview with written-out numbers and pronunciations highlighted](docs/screenshots/customer-spoken-preview.png)
+
+On the Settings step they choose a published voice, with a sample to play, and an optional delivery style:
+
+![Voice picker with two voice cards and sample players](docs/screenshots/customer-voice-picker.png)
+
+Each recording is split into sections that are checked automatically. A flagged section shows what the transcription heard, and any section can be edited and regenerated before downloading WAV or MP3:
+
+![Recording review with four sections, one flagged for review](docs/screenshots/customer-recording.png)
+
+**Admins** manage the voice catalog: reference recordings, trained voices, the speaker's consent, samples and publishing:
+
+![Voices page with two published voices and a draft that still needs a signed consent](docs/screenshots/admin-voices.png)
+
+They see every account and every script customers have submitted, and can disable accounts:
+
+![Customers page with accounts and recent customer scripts](docs/screenshots/admin-customers.png)
+
+Customer recordings open read-only for review:
+
+![A customer recording opened by an admin, with the read-only banner](docs/screenshots/admin-customer-recording.png)
+
+**Training** records prompts for a voice-training dataset and compares a trained voice blind against the other engines:
+
+![Training page with a prompt, progress, microphone tips and blind comparisons](docs/screenshots/admin-training.png)
+
+## Start the studio
 
 If the existing Python environment and model files are in place, start the studio from the project directory in PowerShell.
 
-For the installation that includes **Special instructions**, use its local Python environment.
+For the installation that includes VoxCPM2 (delivery styles, maximum resemblance and trained voices), use its local Python environment.
 
 ```powershell
 .\.tools\directed-env\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
+```
+
+With a CUDA environment set up (see [Use the NVIDIA GPU](#use-the-nvidia-gpu-for-chatterbox-turbo) and [Try VoxCPM2 on the GPU](#try-voxcpm2-on-the-gpu)), run both engines on the GPU:
+
+```powershell
+$env:VOICEOVER_DEVICE = 'cuda'
+$env:VOICEOVER_DIRECTED_DEVICE = 'cuda'
+.\.tools\cuda-benchmark-env\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 For the Chatterbox-only installation, use the original environment.
@@ -20,13 +77,13 @@ For the Chatterbox-only installation, use the original environment.
 .\.venv\Scripts\python.exe -m uvicorn studio.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Open [the local studio](http://127.0.0.1:8000). A fresh checkout needs Python and model setup from step 1 below, `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
+Open [the local studio](http://127.0.0.1:8000). On the first start, the terminal prints a setup code for creating the admin account (see [Accounts](#accounts-admin-and-customers)). A fresh checkout needs the Python and model setup from [step 1 below](#1-set-up-python-and-chatterbox-turbo), `uv pip install -r requirements-studio.txt`, and FFmpeg on `PATH`. The studio works offline after setup. It uses the CPU by default. A verified CUDA environment can set `VOICEOVER_DEVICE=cuda` before starting.
 
 ### Accounts: admin and customers
 
 The studio has sign-in. On the first start with accounts, the terminal prints a **setup code**. Open the studio, which goes to the sign-in page, and create the admin account with that code. Existing recordings, voices and training data remain visible to the admin.
 
-- **Admin:** everything, including **Voice and words**, **Voice training**, trained voices, the inbox and outbox, and **Customers**. On the Customers page, the admin can review every script customers have submitted (also after a customer deletes the recording), open and listen to their recordings, disable an account (it is signed out, its queued recordings stop, and it cannot sign in), and make another account an admin. The studio always keeps at least one active admin.
+- **Admin:** everything, including **Voices**, **References**, **Training**, the inbox and outbox, and **Customers**. On the Customers page, the admin can review every script customers have submitted (also after a customer deletes the recording), open and listen to their recordings, disable an account (it is signed out, its queued recordings stop, and it cannot sign in), and make another account an admin. The studio always keeps at least one active admin.
 - **Customers:** create an account at `/signup` by accepting the terms of use. They get **New recording**, their own **Recordings** and the **Guide**. On the Settings step they choose one of the published **voices** (with a sample to play). The voice's engine settings apply automatically, and engine choices, seeds and model details are hidden. They can keep their own pronunciation list on top of the admin's global list. Each customer can have at most 3 recordings in progress, and downloads are available as soon as a recording is ready.
 
 **Voices (admin).** The **Voices** page is the catalog customers choose from. Each voice combines:
@@ -39,7 +96,7 @@ The studio has sign-in. On the first start with accounts, the terminal prints a 
 To add a voice:
 
 1. Add the speaker's reference recording under **References**. Save its transcript too, so the voice can fall back to maximum resemblance.
-2. Under **Trained voices**, upload the speaker's `lora_config.json` and `lora_weights.safetensors` from one checkpoint folder of the training results. Give it a name such as `jan-step150`. Both files are checked before they are saved to `data/studio/trained/<name>/`.
+2. Under **Trained voices**, upload the speaker's `lora_config.json` and `lora_weights.safetensors` from one checkpoint folder of the training results. Give it a name such as `alex-step150`. Both files are checked before they are saved to `data/studio/trained/<name>/`.
 3. Select **New voice**. Enter the name and description, then choose the reference and trained voice. Record consent: **This is my own voice**, or **Another person has given written consent** with the speaker's name, date and the signed document (PDF, PNG or JPEG). Documents are kept in `data/studio/consent/`, outside Git, and are only available to admins.
 4. Select **Make sample** to render a short sentence customers can play, then **Publish**.
 
@@ -61,9 +118,28 @@ Settings:
 | `VOICEOVER_DIRECTED_DEVICE` | `cpu` | `cuda` uses audio.cpp on a local GPU; `remote` renders on the Runpod Serverless GPU endpoint (needs `VOICEOVER_RUNPOD_ENDPOINT`, `VOICEOVER_RUNPOD_API_KEY` and `VOICEOVER_WORKER_TOKEN`). |
 | `VOICEOVER_DEVICE` | `cpu` | Chatterbox device: `cpu`, `cuda`, or `off` on servers without a GPU. |
 
-**Free test sharing.** To let someone test the studio before paying for hosting, run `scripts\share-studio.ps1` (one-time: `winget install --id Cloudflare.cloudflared`). It starts the GPU studio and a Cloudflare Quick Tunnel, which prints a random `https://….trycloudflare.com` address to share. It needs no account or domain and costs nothing, but the address changes on each start and works only while your PC runs the script. Use it for testing only.
 
-**Online hosting.** The chosen setup is a small VPS for the website plus a Runpod Serverless GPU for rendering. See `deploy/README.md` for the server (setup script, HTTPS with Caddy, systemd, nightly backups and restore) and `worker/README.md` for the GPU endpoint. Email verification and password reset are still to come before inviting customers.
+## Share a local studio for testing
+
+To let someone try the studio before paying for hosting, share the studio running on your own computer through a free [Cloudflare Quick Tunnel](https://try.cloudflare.com). It needs no account, domain or email service.
+
+1. Once: `winget install --id Cloudflare.cloudflared`, then open a new PowerShell window.
+2. From the project folder: `powershell -ExecutionPolicy Bypass -File scripts\share-studio.ps1` (add `-Cpu` without a CUDA setup). It starts the studio with settings for sharing: it accepts `*.trycloudflare.com`, uses secure cookies, reads visitors' addresses from the tunnel for sign-in limits, and turns off the inbox. Then it opens the tunnel.
+3. Share the printed `https://….trycloudflare.com` address. Testers create an account at `/signup` and record with the published voices. The admin signs in at the same address and reviews their recordings under **Customers**.
+4. Press Ctrl+C to stop sharing; the studio stops too.
+
+Limits: the address is random and changes on every start, and it works only while your computer runs the script. Quick Tunnels are meant for testing, without an uptime guarantee. All rendering queues on your GPU. Forgotten passwords cannot be reset until email is set up. For real customers, use [the online setup](#run-it-online).
+
+## Run it online
+
+The planned production setup splits the work:
+
+- **Website, accounts, database and checks:** a small Linux VPS with HTTPS through Caddy, a systemd service and nightly backups. See [deploy/README.md](deploy/README.md).
+- **Rendering:** VoxCPM2 on a Runpod Serverless GPU endpoint that scales to zero and is billed per second. See [worker/README.md](worker/README.md).
+
+The studio uses it with `VOICEOVER_DIRECTED_DEVICE=remote`, and Chatterbox is switched off on the GPU-less server (`VOICEOVER_DEVICE=off`). Before inviting customers, the studio still needs its own domain, email verification and password reset.
+
+## Studio features and settings
 
 ### Use the NVIDIA GPU for Chatterbox Turbo
 
@@ -111,10 +187,10 @@ The studio has three pages, chosen at the top:
 
 - **New recording** works in steps. **Script**: write or import the text. Switch **Edit** to **Preview spoken** to read exactly what the voice will say: the script box is replaced by a formatted view where written-out numbers, dates and abbreviations are highlighted (hover to see the original) and your pronunciations are shown in purple. Select any word to set how it is said; the words saved for this script appear under **Pronunciations** below it. **Settings**: check the active voice reference, choose the voice engine, a **Delivery style** for the whole script or per paragraph, and what happens when a section fails its automatic check, then select **Generate voice-over**. The studio then opens the recording under **Recordings**. A **Guide** page explains the workflow, a welcome note appears on first use, and the **?** buttons explain each control.
 - **Recordings** lists your recordings. Selecting one shows its player, downloads, delivery loudness and actions, and a compact list of sections with a status dot: green for a passed check, amber for needs review, an outline for pending, and grey for not checked. Use the ▶ button on a row to listen, and select a row to edit that section on the right. **Needs review** filters the list to flagged sections. Pauses, engine details and advanced Chatterbox settings are under **More options** in the section editor.
-- **Voice and words** holds the voice references, their transcripts, combining excerpts, and the full pronunciation list. Set these up once.
+- **References** holds the voice references, their transcripts, combining excerpts, and the full pronunciation list. Set these up once.
 - **Guide** explains the three steps, voice setup, pronunciations, review and delivery.
 
-1. The studio imports `data\reference.wav` on the first run. On **Voice and words**, use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. The studio keeps an untouched copy of each new upload under `data\studio\voices\originals` for future fine-tuning. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
+1. The studio imports `data\reference.wav` on the first run. On **References**, use **Add reference WAV** to save another 6–30 second PCM WAV under 16 MB. The studio keeps an untouched copy of each new upload under `data\studio\voices\originals` for future fine-tuning. Give it a name such as *Warm narration*, then switch between recordings under **Saved references**. Each job keeps the reference it used.
 2. Paste text or use **Import script** to load a UTF-8 `.txt`, `.docx`, or text-based `.pdf` file. Files can be up to 10 MB and extracted scripts can be up to 12,000 characters. Edit the text and select **Generate voice-over**.
 3. Listen to the result and download a **WAV** or **MP3**. Select a section under **Recordings** to adjust its wording and regenerate it. If generation stops partway through, use **Retry generation** to continue from the saved sections.
 
@@ -160,7 +236,7 @@ A check is a guide, not a guarantee. Transcription can miss a subtle mispronunci
 
 ### Voice training recordings
 
-**Voice training** builds a dataset for fine-tuning a model on your voice (roadmap step 7 does the training). It shows one prompt at a time: 145 built-in prompts of about 13 minutes in total, covering narration, conversation, commercial reads, instructions, questions, numbers, names and the sounds of English. Paste your own scripts under **Add your own scripts** to add more; they are the best match for your work. Aim for 30 minutes of kept recordings, and 60 for the best result.
+**Training** builds a dataset for fine-tuning a model on a speaker's voice; the kit in `training/` does the training on a rented GPU. It shows one prompt at a time: 145 built-in prompts of about 13 minutes in total, covering narration, conversation, commercial reads, instructions, questions, numbers, names and the sounds of English. Paste your own scripts under **Add your own scripts** to add more; they are the best match for your work. Aim for 30 minutes of kept recordings, and 60 for the best result.
 
 Select **Record** (or press the space bar), wait a moment, read the prompt, then select **Stop**. Prompts with numbers show a **Read as** line with the words to say. The browser records unprocessed mono PCM WAV from the chosen microphone, with no noise suppression or automatic gain. Each take is transcribed and compared with the prompt (at most 10% word differences), and checked for clipping, a quiet level and background noise above −50 dB. Takes that pass are kept automatically; a flagged take explains why, and **Use this take for training** lets you keep it anyway. Recording a prompt again replaces its take. The arrow keys move between prompts.
 
@@ -170,30 +246,30 @@ Select **Record** (or press the space bar), wait a moment, read the prompt, then
 
 Before a section is generated, the studio writes out dates, times, prices, percentages, phone numbers, years, ordinals, number ranges, web addresses and common abbreviations as words. For example, `Jan. 5 at 9 a.m.` is read as "January fifth at nine A M" and `$1,299.99` as "one thousand two hundred ninety-nine dollars and ninety-nine cents". Your script and sections keep the text as written, and bracketed sound cues are left alone.
 
-Add pronunciations under the script on the **Script** step (or select a word in **Preview spoken**), or manage the full list on **Voice and words**. Add words the voice gets wrong, such as names, brands or acronyms. Spell each one as a single lowercase word, such as `noovexuh`. Hyphens and capital letters inside a word are joined into lowercase automatically, because voices read hyphens as pauses or "dash" and may spell out capitals. When the check compares a take with the script, a listed word matches whatever the transcription heard. A saved word matches whole words regardless of capitalization, and your list is applied before the automatic rules. Changes apply to sections generated afterwards. Select **Preview spoken words** to see exactly what the voice will read. Each section shows the words its take used when they differ from the script.
+Add pronunciations under the script on the **Script** step (or select a word in **Preview spoken**), or manage the full list on **References**. Add words the voice gets wrong, such as names, brands or acronyms. Spell each one as a single lowercase word, such as `noovexuh`. Hyphens and capital letters inside a word are joined into lowercase automatically, because voices read hyphens as pauses or "dash" and may spell out capitals. When the check compares a take with the script, a listed word matches whatever the transcription heard. A saved word matches whole words regardless of capitalization, and your list is applied before the automatic rules. Changes apply to sections generated afterwards. Select **Preview spoken words** to see exactly what the voice will read. Each section shows the words its take used when they differ from the script.
 
 Very long sentences are split at a comma or other clause break near the middle rather than at a fixed length.
 
 ### Maximum resemblance
 
-Maximum resemblance uses VoxCPM2's continuation cloning: it receives the voice reference together with an exact transcript of what you say in it, and continues in your voice. It aims for closer timbre, rhythm and delivery than Chatterbox, but it is slower and needs the VoxCPM2 setup above.
+Maximum resemblance uses VoxCPM2's continuation cloning: it receives the voice reference together with an exact transcript of what the speaker says in it, and continues in your voice. It aims for closer timbre, rhythm and delivery than Chatterbox, but it is slower and needs the VoxCPM2 setup above.
 
-1. On **Voice and words**, open **Reference transcript** and type exactly what you say in the active reference, word for word. Select **Save transcript**. Each saved reference has its own transcript; a combined reference needs the words of its excerpts in order.
+1. On **References**, open **Reference transcript** and type exactly what the speaker says in the active reference, word for word. Select **Save transcript**. Each saved reference has its own transcript; a combined reference needs the words of its excerpts in order.
 2. On the **Settings** step, choose **Maximum resemblance** under **Voice engine** and generate. To try it on one section, select the section under **Recordings**, change its engine and select **Regenerate section**.
 
 The engine choice applies to sections without a delivery style. Sections with a delivery style still use VoxCPM2's directed mode. Remove bracketed sound cues before using maximum resemblance, because VoxCPM2 would read them aloud. A wrong transcript can cause mispronunciations or artifacts, so check it against the recording. The first section starts with seed 35; regeneration picks a new seed. On the GPU, the studio passes the transcript to audio.cpp with its `ultimate_clone` option; the transcript appears in that process's arguments, but script text does not. Compare the result with Chatterbox on the same script before customer use.
 
 ### Trained voice
 
-A trained voice is a small LoRA adapter (about 70 MB) trained on your recordings with the kit in `training/`. VoxCPM2 loads it on top of the unchanged base model, so it needs the VoxCPM2 setup above but no extra model download.
+A trained voice is a small LoRA adapter (about 70 MB) trained on a speaker's recordings with the kit in `training/`. VoxCPM2 loads it on top of the unchanged base model, so it needs the VoxCPM2 setup above but no extra model download.
 
-1. From the results zip, copy one checkpoint folder, such as `lora\step_0000150`, to `data\studio\trained\<name>\`, for example `data\studio\trained\step150\`. It must contain `lora_config.json` and `lora_weights.safetensors`. The folder holds your voice and stays out of Git.
-2. Restart the studio. New sections use the newest trained voice folder; set `VOICEOVER_TRAINED_VOICE=<name>` to choose another one.
-3. Under **Voice engine**, choose **Trained voice · no reference** (the adapter alone) or **Trained voice + reference** (the adapter plus your active reference clip). A delivery style still applies, with the trained voice.
+1. Upload one checkpoint folder from the training results (for example `lora/step_0000150`) under **Voices → Trained voices**: `lora_config.json` and `lora_weights.safetensors`. Alternatively, copy the folder to `data\studio\trained\<name>\` and restart. The folder holds a person's voice and stays out of Git.
+2. **For customers:** create or edit a catalog voice on **Voices** and choose the trained voice there.
+3. **For the admin's own recordings:** under **Voice engine**, choose **Trained voice · no reference** (the adapter alone) or **Trained voice + reference** (the adapter plus the active reference clip). The admin's engine menu uses the newest trained voice folder; set `VOICEOVER_TRAINED_VOICE=<name>` to choose another one. A delivery style still applies, with the trained voice.
 
 [training/TRAINED_VOICES.md](training/TRAINED_VOICES.md) records each trained voice and how to use it in other programs; each voice folder also has its own `VOICE.md` and `voice.json`. Each recording remembers the trained voice it was made with; a section's details show the voice and step. On the CPU, the adapter is switched on only for trained sections, without reloading the model. On the GPU, audio.cpp merges the folder into the Q8 model for each section with its `voxcpm2.lora` session option. Sound cues are not available, as with other VoxCPM2 modes.
 
-**Compare your trained voice**, at the bottom of **Voice training**, renders one sentence with two engines in random order. Listen to clips A and B, choose the one that sounds more like you (or **Can't tell**), and only then see which was which. Your picks are tallied, so a few rounds with different sentences show whether the trained voice beats maximum resemblance or Chatterbox. Comparisons do not appear under **Recordings**.
+**Compare your trained voice**, at the bottom of **Training**, renders one sentence with two engines in random order. Listen to clips A and B, choose the one that sounds more like the speaker (or **Can't tell**), and only then see which was which. Your picks are tallied, so a few rounds with different sentences show whether the trained voice beats maximum resemblance or Chatterbox. Comparisons do not appear under **Recordings**.
 
 ### Hands-off intake and the local API
 
@@ -241,7 +317,9 @@ $env:HF_HUB_DISABLE_XET = '1'
 
 Recording history and private files live under `data\studio`. The web server listens only on this computer with the launch command above. Only `studio\static` is served as public assets. The local server is intended for owner use. A self-hosted deployment needs owner authentication before it can be exposed through a network.
 
-## First voice trial
+## Installation and the first voice trial
+
+These steps set up Python, the models and a first reference recording on Windows. The [studio](#start-the-studio) uses the same setup.
 
 ### 1. Set up Python and Chatterbox Turbo
 

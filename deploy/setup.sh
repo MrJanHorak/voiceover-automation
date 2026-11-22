@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-time setup of the studio website on a fresh Ubuntu 24.04 server. Run as root:
-#   curl -fsSL https://raw.githubusercontent.com/MrJanHorak/voiceover-automation/main/deploy/setup.sh | bash
-# or clone the repository and run: sudo bash deploy/setup.sh
+# One-time setup of the studio website on a fresh Ubuntu 24.04 server. Run as root from a clone:
+#   git clone <your repository URL> /opt/voiceover && REPO=<your repository URL> bash /opt/voiceover/deploy/setup.sh
+# REPO defaults to this project's public repository; set it to your fork.
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/MrJanHorak/voiceover-automation.git}"

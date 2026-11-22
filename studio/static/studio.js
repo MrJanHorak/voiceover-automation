@@ -271,7 +271,7 @@ function renderVoice() {
   const menu = byId("voice-selection");
   byId("voice-name").textContent = voice ? voice.label : "No voice reference yet";
   byId("settings-voice").textContent = voice
-    ? `${voice.label}${voice.transcript ? " · transcript saved" : ""}` : "None yet. Add one under Voice and words.";
+    ? `${voice.label}${voice.transcript ? " · transcript saved" : ""}` : "None yet. Add one under References.";
   byId("voice-duration").textContent = voice ? `${voice.duration.toFixed(1)} seconds · WAV` : "Add a recording of your voice to get started.";
   byId("saved-references").hidden = state.voices.length < 2;
   menu.replaceChildren(...state.voices.map((item) => new Option(item.label, item.id)));
@@ -1120,6 +1120,10 @@ function sectionEditor(entry, section, state) {
   });
   const actions = element("div", "section-actions");
   actions.append(sounds, redo);
+  if (entry.read_only) {
+    // Admins review customer recordings without editing controls; the server refuses changes anyway.
+    for (const node of [engine.box, directions.box, overrideNote, actions]) node.hidden = true;
+  }
   nodes.push(label, field, engine.box, directions.box, overrideNote, actions);
   updateActions();
 
@@ -1856,7 +1860,7 @@ function renderComparisons(items) {
       row.append(players);
       if (!item.choice) {
         const actions = element("div", "form-footer compact");
-        for (const [choice, text] of [["A", "A sounds more like me"], ["B", "B sounds more like me"], ["same", "Can't tell"]]) {
+        for (const [choice, text] of [["A", "A sounds more like the speaker"], ["B", "B sounds more like the speaker"], ["same", "Can't tell"]]) {
           const button = element("button", "button button-quiet", text);
           button.type = "button";
           button.addEventListener("click", async () => {

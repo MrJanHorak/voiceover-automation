@@ -92,7 +92,7 @@
 
           <div class="script-words" id="script-words-box">
             <div class="label-row">
-              <span class="field-label">Pronunciations {{ tip("Teach the voice names, brands or acronyms it says wrong. Type the word as written, then how to say it as one lowercase word, like noovexuh. Saved words apply to all your recordings; manage the full list under Voice and words.") }}</span>
+              <span class="field-label">Pronunciations {% if admin %}{{ tip("Teach the voice names, brands or acronyms it says wrong. Type the word as written, then how to say it as one lowercase word, like noovexuh. Your saved words apply to every recording, including customers'; customers can add their own on top. Manage the full list under References.") }}{% else %}{{ tip("Teach the voice names, brands or acronyms it says wrong. Type the word as written, then how to say it as one lowercase word, like noovexuh. Saved words apply to all your future recordings.") }}{% endif %}</span>
             </div>
             <ul id="script-words" class="word-chips" aria-label="Pronunciations used in this script"></ul>
             <div class="word-form">
@@ -116,7 +116,7 @@
             <span class="muted">Voice reference</span>
             <strong id="settings-voice">Checking…</strong>
             <button type="button" class="link-button" data-view="voice">Change</button>
-            {{ tip("The recording of your voice that the model copies. Add or switch references, and save the transcript needed for maximum resemblance, under Voice and words.") }}
+            {{ tip("The recording of your voice that the model copies. Add or switch references, and save the transcript needed for maximum resemblance, under References.") }}
           </div>
           <div id="script-engine"></div>
           {% else %}
@@ -171,7 +171,7 @@
         <aside class="panel history-panel" aria-label="Saved recordings">
           {% if admin and auth_enabled %}
           <div class="segmented history-scope" role="group" aria-label="Whose recordings">
-            <button type="button" id="scope-mine" aria-pressed="true">My recordings</button>
+            <button type="button" id="scope-mine" aria-pressed="true">Mine</button>
             <button type="button" id="scope-customers" aria-pressed="false">Customers</button>
           </div>
           {% endif %}
@@ -242,9 +242,9 @@
       </div>
     </section>
 
-    <!-- Voice and words: references, transcripts and pronunciations, set up once. -->
+    <!-- References: voice references, transcripts and pronunciations. -->
     <section id="view-voice" class="view" aria-labelledby="voice-view-heading" hidden>
-      <div class="view-heading"><h1 id="voice-view-heading">Voice and words</h1></div>
+      <div class="view-heading"><h1 id="voice-view-heading">References and pronunciations</h1></div>
       <div class="voice-grid">
         <section class="panel" aria-labelledby="voice-heading">
           <div class="panel-heading"><h2 id="voice-heading">Voice reference {{ tip("A 6–30 second WAV of you speaking, which the model copies. Record in a quiet room at a steady distance from the microphone, in the delivery you want. The active reference is used for new recordings.") }}</h2></div>
@@ -310,7 +310,7 @@
         </section>
       </div>
     </section>
-    <!-- Voice training: record prompts for a fine-tuning dataset of the owner's voice. -->
+    <!-- Training: record prompts for a fine-tuning dataset of a speaker's voice. -->
     <section id="view-training" class="view" aria-labelledby="training-heading" hidden>
       <div class="view-heading">
         <h1 id="training-heading">Voice training {{ tip("Recordings made here train a version of the voice model on your own speech, so it captures your rhythm and pronunciation more closely than a single reference clip. Training itself happens later on a rented GPU; this page builds the dataset.") }}</h1>
@@ -439,7 +439,7 @@
           <div class="panel-heading"><h2 id="voice-form-heading">New voice</h2></div>
           <form id="voice-form" novalidate>
             <label for="profile-name">Name customers see</label>
-            <input type="text" id="profile-name" maxlength="60" required placeholder="For example: Jan · warm narrator">
+            <input type="text" id="profile-name" maxlength="60" required placeholder="For example: Alex · warm narrator">
             <label for="profile-description">Description</label>
             <textarea id="profile-description" rows="2" maxlength="300" placeholder="Warm, friendly and clear. Great for explainers and adverts."></textarea>
             <label for="profile-reference">Reference recording {{ tip("A clean recording of the speaker, added under References. With a saved transcript it also enables maximum resemblance.") }}</label>
@@ -474,7 +474,7 @@
           <ul id="trained-list" class="tips-list muted"></ul>
           <form id="trained-form" novalidate>
             <label for="trained-name">Name</label>
-            <input type="text" id="trained-name" maxlength="64" placeholder="For example: jan-step150">
+            <input type="text" id="trained-name" maxlength="64" placeholder="For example: alex-step150">
             <label for="trained-config">lora_config.json</label>
             <input type="file" id="trained-config" accept=".json">
             <label for="trained-weights">lora_weights.safetensors</label>
@@ -510,7 +510,7 @@
 
     <section id="view-guide" class="view guide" aria-labelledby="guide-heading" hidden>
       <div class="view-heading"><h1 id="guide-heading">How the studio works</h1></div>
-      {% if admin %}<p class="guide-lead">Turn a script into a recording in your own voice, in three steps. Set up your voice once under Voice and words; after that, most recordings take a few minutes of your attention.</p>
+      {% if admin %}<p class="guide-lead">Turn a script into a recording with a cloned voice, in three steps. Set up a voice once under References; after that, most recordings take a few minutes of your attention.</p>
       {% else %}<p class="guide-lead">Turn a script into a finished voice-over in three steps. Most recordings take a few minutes of your attention.</p>{% endif %}
 
       <ol class="guide-steps">
@@ -540,7 +540,7 @@
           <h2>Set up your voice once</h2>
           <ul>
             <li>Record 10–30 seconds of yourself in a quiet room, in the style you want to sound like, and save it as a WAV.</li>
-            <li>Add it under <strong>Voice and words</strong>, then type exactly what you said in <strong>Reference transcript</strong>. Maximum resemblance needs it.</li>
+            <li>Add it under <strong>References</strong>, then type exactly what the speaker said in <strong>Reference transcript</strong>. Maximum resemblance needs it.</li>
             <li>Keep several references, such as conversational and energetic, and switch between them.</li>
           </ul>
         </section>
@@ -565,7 +565,7 @@
         <section class="panel">
           <h2>Training your voice</h2>
           <ul>
-            <li>Under <strong>Voice training</strong>, read short prompts aloud; each take is checked for the right words, clipping and noise.</li>
+            <li>Under <strong>Training</strong>, read short prompts aloud; each take is checked for the right words, clipping and noise.</li>
             <li>Aim for 30 minutes of kept recordings, in several short sessions. Add your own scripts for the best results.</li>
             <li><strong>Export training set</strong> creates the folder used to train a version of the model on your voice.</li>
             <li>Once trained, <strong>Compare your trained voice</strong> lets you judge it blind against the other engines.</li>

@@ -84,7 +84,7 @@ class RemoteEngineTests(unittest.TestCase):
 
     def test_trained_voice_with_reference(self):
         api = FakeRunpod()
-        adapter = make_adapter(self.root / "jan-step150")
+        adapter = make_adapter(self.root / "speaker-step150")
         output = self.root / "out.wav"
         engine = self.engine(api)
         engine.render_trained("Private script.", self.reference, 42, output, adapter)
@@ -95,7 +95,7 @@ class RemoteEngineTests(unittest.TestCase):
         job = body["input"]
         self.assertEqual((job["text"], job["seed"], job["transcript"]), ("Private script.", 42, None))
         self.assertEqual(base64.b64decode(job["reference"]), self.reference.read_bytes())
-        self.assertEqual(job["adapter"], {"name": "jan-step150", "sha256": hashlib.sha256(b"weights").hexdigest()})
+        self.assertEqual(job["adapter"], {"name": "speaker-step150", "sha256": hashlib.sha256(b"weights").hexdigest()})
         self.assertEqual(engine.details()["device"], "remote GPU")
         self.assertEqual(engine.details()["runtime"], "2.0.3")
         self.assertEqual(len([r for r in api.requests if "/status/" in r[1]]), 3)
@@ -184,13 +184,13 @@ class WorkerHandlerTests(unittest.TestCase):
         weights = b"trained weights"
         files = {"lora_config.json": CONFIG, "lora_weights.safetensors": weights}
         event = {"input": {"text": "Hello.", "seed": 42, "reference": base64.b64encode(wav_bytes()).decode(),
-                           "adapter": {"name": "jan-step150", "sha256": hashlib.sha256(weights).hexdigest()}}}
+                           "adapter": {"name": "speaker-step150", "sha256": hashlib.sha256(weights).hexdigest()}}}
         for _ in range(2):
             result = worker.handler(event, engine, self.studio(files))
             self.assertNotIn("error", result)
             self.assertEqual(base64.b64decode(result["audio"])[:4], b"RIFF")
         self.assertEqual(len(self.downloads), 2)  # Two files, downloaded once; the second job used the cache.
-        self.assertEqual(self.downloads[0], ("https://studio.example/api/worker/adapters/jan-step150/lora_config.json", "t" * 40))
+        self.assertEqual(self.downloads[0], ("https://studio.example/api/worker/adapters/speaker-step150/lora_config.json", "t" * 40))
         self.assertEqual(engine.calls[0][:4], ("Hello.", b"RIFF", 42, None))
         self.assertEqual(engine.calls[0][4], ["lora_config.json", "lora_weights.safetensors"])
         self.assertEqual(result["details"]["device"], "cuda")
@@ -233,16 +233,16 @@ class WorkerRouteTests(unittest.TestCase):
         token = "w" * 40
         with TemporaryDirectory(dir=".tools") as temporary, patch.dict(os.environ, {"VOICEOVER_WORKER_TOKEN": token}):
             root = Path(temporary)
-            make_adapter(root / "studio" / "trained" / "jan-step150", b"weights")
+            make_adapter(root / "studio" / "trained" / "speaker-step150", b"weights")
             with TestClient(create_app(root, Turbo(), auth=True), base_url="http://localhost") as client:
-                url = "/api/worker/adapters/jan-step150/lora_weights.safetensors"
+                url = "/api/worker/adapters/speaker-step150/lora_weights.safetensors"
                 self.assertEqual(client.get(url).status_code, 404)
                 self.assertEqual(client.get(url, headers={"X-Worker-Token": "wrong" * 8}).status_code, 404)
                 response = client.get(url, headers={"X-Worker-Token": token})
                 self.assertEqual((response.status_code, response.content), (200, b"weights"))
                 self.assertEqual(client.get("/api/worker/adapters/missing/lora_config.json",
                                             headers={"X-Worker-Token": token}).status_code, 404)
-                self.assertEqual(client.get("/api/worker/adapters/jan-step150/studio.sqlite3",
+                self.assertEqual(client.get("/api/worker/adapters/speaker-step150/studio.sqlite3",
                                             headers={"X-Worker-Token": token}).status_code, 422)
 
 

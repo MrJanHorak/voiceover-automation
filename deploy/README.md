@@ -13,7 +13,7 @@ The website, database and automatic checks run on a small Linux server (VPS). Vo
 
 1. Create the server: Hetzner Cloud → Add server → Ubuntu 24.04, a cost-optimized plan with 4 GB RAM, your SSH key, and an IPv4 address.
 2. At the domain registrar, add an **A record** for the studio's address (for example `voices.example.com`) pointing at the server's IPv4.
-3. On the server, as root: `git clone https://github.com/MrJanHorak/voiceover-automation.git /opt/voiceover && bash /opt/voiceover/deploy/setup.sh`
+3. On the server, as root, clone your copy of the repository and run the setup script: `git clone <your repository URL> /opt/voiceover && REPO=<your repository URL> bash /opt/voiceover/deploy/setup.sh`
 
    The script installs Caddy, FFmpeg, a Python 3.11 environment with CPU PyTorch, and the check models. It also creates `/etc/voiceover.env` with a random worker token and sets up nightly backups. If the repository is private, clone it with a GitHub deploy key or token first.
 4. Edit `/etc/voiceover.env`: set the domain and the Runpod endpoint ID and API key. Copy the `VOICEOVER_WORKER_TOKEN` value for the next step.

@@ -1,12 +1,12 @@
 # Trained voices
 
-This file records every adapter trained from the owner's recordings, and how to use one in this studio or another program. The adapters themselves are private and never committed. Each one lives in `data/studio/trained/<name>/` with its own `VOICE.md` (usage) and `voice.json` (machine-readable details), so the folder still makes sense when copied to another project.
+This file records every adapter trained in this studio, and how to use one in this studio or another program. The adapters themselves are private and never committed. Each one lives in `data/studio/trained/<name>/` with its own `VOICE.md` (usage) and `voice.json` (machine-readable details), so the folder still makes sense when copied to another project.
 
 ## Record
 
 | Name | Date | Base model | Data | Settings | Checkpoint | Validation loss (total / diff) | Verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| step150 | 2026-11-20 | VoxCPM2 `7936080b`, voxcpm 2.0.3 | Export `2026-11-20_154735`: 184 clips, 19.6 min | `voxcpm2_lora.yaml`: r=32, alpha=32, lr 1e-4, 300 steps | 150 of 300 | 0.887 / 0.756 | **In use (2026-11-20).** In the owner's blind comparisons, Trained voice + reference sounded most like the owner, with Maximum resemblance a close second. It is now the studio default. |
+| step150 | 2026-11-20 | VoxCPM2 `7936080b`, voxcpm 2.0.3 | Export `2026-11-20_154735`: 184 clips, 19.6 min | `voxcpm2_lora.yaml`: r=32, alpha=32, lr 1e-4, 300 steps | 150 of 300 | 0.887 / 0.756 | **In use (2026-11-20).** In blind comparisons, Trained voice + reference sounded most like the speaker, with Maximum resemblance a close second. It is now the studio default. |
 
 The same run's other checkpoints scored as follows. Lower is better. "Diff" tracks how the voice sounds; "total" also includes when to stop speaking.
 
@@ -33,6 +33,6 @@ Full examples are in each voice's `VOICE.md`.
 
 ## Rules
 
-- Owner's voice only, owner's projects only. Do not upload adapters to Hugging Face or shared drives.
+- Use a trained voice only with its speaker's recorded consent, and only for the uses they agreed to; record that consent on the Voices page. Do not upload adapters to Hugging Face or shared drives.
 - Keep the Perth watermark on generated audio, and label it as AI-generated. VoxCPM2's model card forbids impersonation, fraud and disinformation.
 - VoxCPM2 and audio.cpp are Apache-2.0. Commercial use of the generated audio is allowed under the base model's license.

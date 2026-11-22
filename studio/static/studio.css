@@ -426,3 +426,10 @@ audio { width: 100%; height: 42px; display: block; margin: .7rem 0; }
 input[type="file"] { color: var(--muted); font-size: .85rem; }
 @media (max-width: 980px) { .voices-grid { grid-template-columns: 1fr; } .voices-grid > section:first-child { grid-row: auto; } }
 .voice-item .form-footer { margin-top: .8rem; }
+
+/* Wider top bar so the admin's seven pages fit on one row at common laptop widths */
+body[data-admin="true"] .topbar-inner { width: min(100% - 3rem, 1320px); }
+.nav-link { padding: .55rem .62rem; }
+.main-nav { gap: .1rem; }
+/* Break long recording titles between words, not inside them */
+.history-name { overflow-wrap: break-word; word-break: normal; hyphens: auto; }

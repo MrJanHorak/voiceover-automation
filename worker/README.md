@@ -17,7 +17,7 @@ The image bakes in VoxCPM2 revision `7936080b41163874f38610f46f438e2c0757f9fd` (
 
 Creating the endpoint costs nothing until it renders.
 
-1. **Build from GitHub.** Choose Serverless → New endpoint → GitHub repo → `MrJanHorak/voiceover-automation`, branch `main`, Dockerfile path `worker/Dockerfile`, build context the repository root. Runpod builds the image; the first build takes a while because of PyTorch and the model.
+1. **Build from GitHub.** Push the repository (or your fork) to GitHub, connect GitHub in the Runpod console, then choose Serverless → New endpoint → GitHub repo → your repository, branch `main`, Dockerfile path `worker/Dockerfile`, build context the repository root. Runpod builds the image; the first build takes a while because of PyTorch and the model.
 2. **GPU:** 24 GB (L4, A5000, RTX 3090 or 4090 class). VoxCPM2 with a trained voice uses about 8–10 GB.
 3. **Workers:** max 1 (raise later if customers wait), active (minimum) 0, so it scales to zero. **Idle timeout:** about 60 seconds, so all sections of a recording reuse the warm worker. **Execution timeout:** 600 seconds.
 4. **Container disk:** 30 GB. **FlashBoot:** on.
